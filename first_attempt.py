@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from visualisation_tools import plot_function, compare_parameterizations, compare_functions
 from scipy import interpolate
 from numba import njit, prange
 
@@ -17,11 +18,23 @@ class LagosWrightAiyagariSolver:
         self.alpha = params.get('alpha', 0.075)  # Overall probability of needing to consume in DM
         self.alpha_1 = params.get('alpha_1', 0.06)  # Probability of case where both cash and assets accepted
         self.alpha_0 = 1 - self.alpha_1  # Probability of case where only cash accepted
+
+        self.gamma = params.get('gamma', 1.5)  # Curvature of utility function
+        self.Psi = params.get('Psi', 2.2)  # Level of early utility
+        self.psi = params.get('psi', 0.28) # Curvature of early utility
+        self.zeta = params.get('zeta', 0.75)  # Curvature of production function
+        self.nu = params.get('nu', 1.6)  # Matching function curvature
+        self.mu = params.get('mu', 0.7)  # Share of revenue going to workers
+        self.delta = params.get('delta', 0.035)  # Job destruction rate
+        self.kappa = params.get('kappa', 7.29)  # Job posting cost
+
+        self.replace_rate = params.get('repl_rate', 0.4)  # Fraction of unemployment compensation / working wage income
+
         
         # Grid specifications
         self.n_a = params.get('n_a', 100)  # Grid size for assets
         self.n_m = params.get('n_m', 50)   # Grid size for money
-        self.n_e = params.get('n_e', 5)    # Number of productivity states
+        self.n_z = params.get('n_z', 3)    # Number of productivity states
         
         # Price parameters
         self.phi_m = params.get('phi_m', 1.0)  # Price of money
@@ -49,7 +62,9 @@ class LagosWrightAiyagariSolver:
         m_max = params.get('m_max', 10.0)
         self.m_grid = np.linspace(m_min, m_max, self.n_m)
         
-        # Productivity grid and transition matrix
+        # Productivity grid
+        self.z_grid = np.array([0.58, 0.98, 2.15])  # Productivity levels
+        self.gz = np.array([0.62, 0.28, 0.1])  # Productivity transition probabilities
         
     
     def initialize_functions(self):
@@ -82,14 +97,46 @@ class LagosWrightAiyagariSolver:
         1. Utility function for centralised market
         2. c : endogenously determined by the skill type e, which impacts the budget constraint
         """
-        # Placeholder - replace with actual utility function
-        
         return (c ** (1 - self.gamma) - 1) / (1 - self.gamma)
     
     def utility_dm(self, y):
-        """Utility function for decentralized market"""
-        # Placeholder - replace with actual DM utility function
+        """
+        Utility function for decentralized market -- paramters are different from the centralised market
+        Generates 26% increase in consumption during preference shocks.
+        """
         return self.Psi * (y ** (1 - self.psi) - 1) / (1 - self.psi)
+    
+    def κ_prime_inv(self, py):
+        """
+        Solve the firm's optimal early consumption goods production, given early consumption price.
+        Assumed: q_bar = y_bar = 1
+        :param py:
+        :return: the optimal supply of early consumption goods
+        """
+        y_temp = 1 / ((1 + py ** (1 / (self.zeta - 1))) ** self.zeta)
+        y_tilda = max(min(y_temp, 1), 0)
+        return y_tilda
+
+    def κ_fun(self, y):
+        """
+        κ(y) = q̄ - Q(y), where Q is a PPF and q̄ == 1.
+        Opportunity cost of producing y.
+        :param y: a vector of early consumption.
+        :return:
+        """
+        cost = np.zeros_like(y)
+        positive_mask = (y >= 0)
+        cost[positive_mask] = 1 - (1 - y[positive_mask] ** (1 / self.zeta)) ** self.zeta
+        return cost
+
+    
+    def q_fun(self, py):
+        """
+        The productivity-adjusted revenue of a job (independent of productivity z).
+        """
+        y_tilda = self.κ_prime_inv(py)
+        q = 1 + py * y_tilda - self.κ_fun(y_tilda)
+        return q
 
     def firm_post_rev(self, prices):
         """
@@ -104,25 +151,51 @@ class LagosWrightAiyagariSolver:
         Returns:
             normalized_rev: The value per unit of productivity (independent of z)
         """
-        μ, δ = parms.μ, parms.δ
         py = prices[0]
         Rl = prices[1]
 
         q = self.q_fun(py)
-        normalized_rev = (1 - μ) * q / (1 - (1 - δ) / Rl)
+        normalized_rev = (1 - self.mu) * q / (1 - (1 - self.delta) / Rl)
         return normalized_rev
+    
+    def job_finding(self, θ):
+        """
+        Job finding probability λ for a worker.
+        :param θ: tightness in the labor market:  job vacancy / seekers
+        :return: vacancy filling rate between 0 and 1.
+        """
+        prob = 1 / (1 + θ ** (-self.zeta)) ** (1 / self.zeta)
+        return min(max(prob, 1e-3), 1)
+
+    def job_filling(self, θ):
+        """
+        Job filling rate for a firm.
+        :param θ: tightness in the labor market job_opening / seekers
+        :return: vacancy filling rate between 0 and 1.
+        """
+        prob = 1 / (1 + θ ** self.zeta) ** (1 / self.zeta)
+        return min(max(prob, 1e-3), 1)
+    
+    def job_fill_inv(self, x):
+        """
+        Inverse function of job filling function.
+        :param x: probability of job filling
+        :return: tightness
+        """
+        θ = ((1 / x) ** self.zeta - 1) ** (1 / self.zeta)
+        return θ
 
     def solve_θ(self, prices):
         """
         Solves for equilibrium market tightness using the free-entry condition.
         
-        The key insight is that both the vacancy creation cost (K*z) and the expected 
+        The key insight is that both the vacancy creation cost (kappa*z) and the expected 
         benefit of hiring (rev*z) scale with productivity z. Therefore, when comparing 
         costs and benefits, z cancels out, leading to a single market tightness for all 
         productivity types.
         
-        Derived from Eq (17): -zk + λ(θ)zϕ̃ᶠ/θRⁱ ≤ 0
-        Dividing by z:        -k + λ(θ)ϕ̃ᶠ/θRⁱ ≤ 0
+        Derived from Eq (17): -z*kappa + λ(θ)zϕ̃ᶠ/θRⁱ ≤ 0
+        Dividing by z:        -kappa + λ(θ)ϕ̃ᶠ/θRⁱ ≤ 0
         
         Parameters:
             prices: Vector of prices [py, Rl]
@@ -132,16 +205,16 @@ class LagosWrightAiyagariSolver:
             λ: Job-finding probability
             filling: Vacancy-filling probability
         """
-        K, c = parms.K, parms.c
+        kappa = self.kappa
         Rl = prices[1]
         # Get productivity-normalized value of a filled job
         normalized_rev = self.firm_post_rev(prices=prices)
         
         # Compare expected cost with expected benefit (both normalized by z)
-        if K >= normalized_rev / Rl:
+        if kappa >= normalized_rev / Rl:
             θ = 1e-3  # Almost no vacancies if cost exceeds revenue
         else:
-            θ = self.job_fill_inv(K * Rl / normalized_rev)
+            θ = self.job_fill_inv(kappa * Rl / normalized_rev)
         
         # Compute job finding probability & vacancy filling probability
         λ = self.job_finding(θ)
@@ -149,8 +222,6 @@ class LagosWrightAiyagariSolver:
         return θ, λ, filling
 
 
-    
-    
     def solve_dm_problem(self, a_next, m_next, e_next_idx, omega):
         """
         Solve the decentralized market problem for given state.
@@ -422,36 +493,84 @@ class LagosWrightAiyagariSolver:
         
         return dist
     
-    def aggregate_quantities(self, dist):
+    def aggregate_quantities(self, prices, dist):
         """
-        Compute aggregate quantities based on distribution
+        Note: Since the market tightness is independent of skill types z,
+                    we didn't adjust the market clear function since employment will stay the same.
+                - Optimal early consumption supply: z*y_s.
+                - Optimal illiquid asset based on firm's profits Js: z*Φ^f(z).
+                - Demand side: captured skill types through the household distribution.
+        :param return_error: depending on the root-finding algorithm, the return of this function is different
+        :param prices: early consumption price + return of partially liquid assets.
+        :return:
+        """
+
+        Na, mu, rrate, delta = self.Na, self.mu, self.replace_rate, self.delta
+        Nz, zgrid, gz = self.Nz, self.zgrid, self.gz
+        Rm, alpha_1, alpha = self.Rm, self.alpha_1, self.alpha
+        Ag, Rm = self.Ag, self.Rm
+
+        # Unpack the price vector
+        py = prices[0]  # Price of early consumption
+        Rl = prices[1]  # Return on illiquid assets
+
+        # Set taxes (or transfers)
+        tau = np.full((Na, 2, Nz), ((1 / Rl) - 1.0) * Ag)
         
-        Note: Since market tightness is independent of skill types z,
-        we can calculate a single θ that applies to all labor markets.
-        This simplification works because:
-        1) Both vacancy costs and job values scale with z
-        2) When we compare costs and benefits, z cancels out
-        Returns: dictionary of aggregate values
-        """
-        """
+        # Calculate optimal early consumption supply
+        Ys = self.κ_prime_inv(py=py)  # Ys = y/z: optimal supply of early consumption goods per unit of productivity
         
-        """
-        # ...existing code...
+        # Calculate the total firm revenue for each productivity type
+        # This is the revenue before wage payments, depending on productivity z
+        frev = self.zgrid * (1.0 + py * Ys - self.κ_fun(Ys))
+        
+        # Calculate wage rates for employed workers (share μ of revenue)
+        w1_bar = mu * frev
+        
+        # Calculate unemployment benefits (fraction rrate of employed wage)
+        wo_bar = rrate * w1_bar
+        
+        # Store wage rates in a matrix: [employment status × skill types]
+        wages_bar = np.array([wo_bar, w1_bar])
+
+        # Update total wages including transfers
+        wages = np.zeros((Na, 2, Nz))
+        for j in range(Nz):
+            for i in range(2):
+                wages[:, i, j] = wages_bar[i, j] + tau[:, i, j]
+
+        # Calculate firm profits (revenue minus wage payments)
+        profits = frev - wages_bar[1, :]
+        
+        # Calculate present value of firm profits (Js)
+        self.Js = profits / (1 - (1 - delta) / Rl)
+
+        # Solve for market tightness and employment transition probabilities
+        θ, λ, filling = self.solve_θ(prices=prices)
+        
+        # Update employment transition matrix (2×2 Markov chain)
+        P = np.array([[1 - λ, λ],
+                    [delta, 1 - delta]])
+        
+        # Calculate steady state employment rate
+        emp = λ / (delta + λ)
         
         # Calculate total firm revenue (z-dependent)
-        mm.frev = state.zgrid * (1.0 + py * mm.Ys - self.κ_fun(mm.Ys))
+        frev = self.zgrid * (1.0 + py * Ys - self.κ_fun(Ys))
         
         # Calculate wages (z-dependent)
-        w1_bar = μ * mm.frev  # Employed workers get μ share of revenue
+        w1_bar = mu * frev  # Employed workers get mu share of revenue
         wo_bar = rrate * w1_bar  # Unemployed get replacement rate * wage
-        mm.wages_bar = np.array([wo_bar, w1_bar])
+        wages_bar = np.array([wo_bar, w1_bar])
         
         # Calculate z-dependent profits and job values
-        profits = mm.frev - mm.wages_bar[1, :]
-        mm.Js = profits / (1 - (1 - δ) / Rl)
+        profits = frev - wages_bar[1, :]
+        Js = profits / (1 - (1 - delta) / Rl)
         
         # Calculate z-independent market tightness
-        mm.θ, λ, filling = self.solve_θ(prices=prices)
+        θ, λ, filling = self.solve_θ(prices=prices)
+
+        # add two more goods
 
         # Aggregate assets
         agg_assets = 0
@@ -566,10 +685,16 @@ if __name__ == "__main__":
         'gamma': 1.5, # curvature of late utility
         'Psi': 2.2,  # level of early utility
         'psi': 0.28, # curvature of early utility
+        'zeta': 0.75, # curvature of production function
         'nu': 1.6, # matching function curvature
+        'mu': 0.7, # share of revenue going to workers
+        'delta': 0.035, # job destruction rate
+        'kappa': 7.29, # job posting cost
+        'repl_rate': 0.4, # fraction of unemployment compensation / working wage income
         'n_a': 50,
         'n_m': 30,
-        'n_e': 5,
+        'n_z': 3, # number of productivity states
+        'n_e': 2, # number of employment states
         'a_min': 0.0,
         'a_max': 15.0,
         'm_min': 0.0,
