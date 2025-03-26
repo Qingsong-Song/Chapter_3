@@ -30,6 +30,14 @@ class LagosWrightAiyagariSolver:
 
         self.replace_rate = params.get('repl_rate', 0.4)  # Fraction of unemployment compensation / working wage income
 
+        # Price vector: [py, Rl, phi_m, i]
+        self.prices = np.array([
+            params.get('py', 1.0),      # Price of early consumption goods
+            params.get('Rl', 1.03),     # Return on illiquid assets
+            params.get('phi_m', 1.0),   # Price of money
+            params.get('i', 0.02)       # Nominal interest rate
+        ])
+
         
         # Grid specifications
         self.n_a = params.get('n_a', 100)  # Grid size for assets
@@ -221,51 +229,180 @@ class LagosWrightAiyagariSolver:
         filling = self.job_filling(θ)
         return θ, λ, filling
 
-
-    def solve_dm_problem(self, a_next, m_next, e_next_idx, omega):
+    
+    def solve_dm_problem(self, e_idx, a_idx, m_idx):
         """
-        Solve the decentralized market problem for given state.
+        Solve the decentralised market problem for a given state.
         
-        Args:
-            a_next: Next period asset holdings
-            m_next: Next period money holdings
-            e_next_idx: Next period productivity state index
-            omega: Meeting type (0 or 1)
-                   omega=0: Only cash accepted
-                   omega=1: Both cash and assets accepted
+        Key considerations:
+        1. Households must consume if hit by preference shock (with probability alpha)
+        2. Asset acceptance depends on omega:
+        - With probability alpha_0, only cash is accepted (ω=0)
+        - With probability alpha_1, both cash and illiquid assets are accepted (ω=1)
+        3. Borrowing decision must compare utilities with and without borrowing
+        """
+        a = self.a_grid[a_idx]
+        m = self.m_grid[m_idx]
+        e = self.e_grid[e_idx]
+        
+        # Extract prices from vector
+        py = self.prices[0]
+        Rl = self.prices[1]
+        phi_m = self.prices[2]
+        i = self.prices[3]
+        
+        # Case ω=0: Only money is accepted
+        # Maximum affordable y with only money (no borrowing)
+        y0_max_no_borrow = m * phi_m / py
+        
+        # Without borrowing:
+        # Try different y0 values up to y0_max_no_borrow
+        y0_values_no_borrow = np.linspace(0, y0_max_no_borrow, 50)
+        util0_no_borrow = np.zeros_like(y0_values_no_borrow)
+        
+        for i, y0 in enumerate(y0_values_no_borrow):
+            # Calculate post-DM wealth
+            a_post = a + m * self.phi_m - py * y0
+            # For case ω=0 without borrowing
+            b0 = 0
+            # Calculate utility
+            util0_no_borrow[i] = self.utility_dm(y0) + self.interpolate_CM_value(a_post, -b0, e_idx)
+        
+        # Find optimal y0 without borrowing
+        if len(util0_no_borrow) > 0:
+            best_idx = np.argmax(util0_no_borrow)
+            optimal_y0_no_borrow = y0_values_no_borrow[best_idx]
+            max_util0_no_borrow = util0_no_borrow[best_idx]
+        else:
+            optimal_y0_no_borrow = 0
+            max_util0_no_borrow = self.utility_dm(0) + self.interpolate_CM_value(a + m * self.phi_m, 0, e_idx)
+        
+        # With borrowing:
+        # We need to consider higher y values that require borrowing
+        y0_max_with_borrow = min(2*y0_max_no_borrow, 10)  # Arbitrary upper bound
+        y0_values_with_borrow = np.linspace(y0_max_no_borrow+0.01, y0_max_with_borrow, 50)
+        util0_with_borrow = np.zeros_like(y0_values_with_borrow)
+        b0_values = np.zeros_like(y0_values_with_borrow)
+        
+        for i, y0 in enumerate(y0_values_with_borrow):
+            # Calculate required borrowing
+            payment_needed = py * y0
+            available_funds = m * self.phi_m
+            b0 = (payment_needed - available_funds) / self.phi_m
             
-        Returns:
-            y: Consumption in DM
-            b: Borrowing in DM (if any)
-        """
-        # This is where you would solve the DM problem given the CM choices
+            # Calculate post-DM wealth and utility
+            a_post = a  # Only money was spent, assets remain
+            util0_with_borrow[i] = self.utility_dm(y0) + self.interpolate_CM_value(a_post, -b0, e_idx)
+            b0_values[i] = b0
         
-        # Determine available liquidity based on meeting type
-        if omega == 0:
-            # Only cash can be used
-            liquidity = m_next
-        else:  # omega == 1
-            # Both cash and assets can be used
-            liquidity = m_next + a_next
+        # Find optimal y0 with borrowing
+        if len(util0_with_borrow) > 0:
+            best_idx = np.argmax(util0_with_borrow)
+            optimal_y0_with_borrow = y0_values_with_borrow[best_idx]
+            optimal_b0_with_borrow = b0_values[best_idx]
+            max_util0_with_borrow = util0_with_borrow[best_idx]
+        else:
+            optimal_y0_with_borrow = 0
+            optimal_b0_with_borrow = 0
+            max_util0_with_borrow = -np.inf
         
-        # Price of DM good (normalized to 1 for simplicity)
-        p_y = 1.0
+        # Compare utilities with and without borrowing
+        if max_util0_no_borrow >= max_util0_with_borrow:
+            optimal_y0 = optimal_y0_no_borrow
+            optimal_b0 = 0
+        else:
+            optimal_y0 = optimal_y0_with_borrow
+            optimal_b0 = optimal_b0_with_borrow
         
-        # Maximum feasible DM consumption given liquidity constraint
-        max_feasible_y = liquidity / p_y
+        # Case ω=1: Both money and assets are accepted
+        # Maximum affordable y with money and assets (no borrowing)
+        y1_max_no_borrow = (m * self.phi_m + a) / py
         
-        # First-best DM consumption level (unconstrained optimum)
-        # This would typically come from maximizing DM utility subject to participation constraints
-        # For now, we use a placeholder value
-        y_star = 1.0  # First-best level of DM consumption
+        # Without borrowing:
+        # Try different y1 values up to y1_max_no_borrow
+        y1_values_no_borrow = np.linspace(0, y1_max_no_borrow, 50)
+        util1_no_borrow = np.zeros_like(y1_values_no_borrow)
         
-        # Actual DM consumption is the minimum of first-best and feasible consumption
-        y = min(y_star, max_feasible_y)
+        for i, y1 in enumerate(y1_values_no_borrow):
+            # Calculate post-DM wealth with full payment from available funds
+            payment = py * y1
+            remaining_wealth = m * self.phi_m + a - payment
+            # For case ω=1 without borrowing
+            b1 = 0
+            # Calculate utility
+            util1_no_borrow[i] = self.utility_dm(y1) + self.interpolate_CM_value(remaining_wealth, -b1, e_idx)
         
-        # Borrowing in DM (usually zero in basic Lagos-Wright, but can be extended)
-        b = 0.0
+        # Find optimal y1 without borrowing
+        if len(util1_no_borrow) > 0:
+            best_idx = np.argmax(util1_no_borrow)
+            optimal_y1_no_borrow = y1_values_no_borrow[best_idx]
+            max_util1_no_borrow = util1_no_borrow[best_idx]
+        else:
+            optimal_y1_no_borrow = 0
+            max_util1_no_borrow = self.utility_dm(0) + self.interpolate_CM_value(m * self.phi_m + a, 0, e_idx)
         
-        return y, b
+        # With borrowing:
+        # We need to consider higher y1 values that require borrowing
+        y1_max_with_borrow = min(2*y1_max_no_borrow, 10)  # Arbitrary upper bound
+        y1_values_with_borrow = np.linspace(y1_max_no_borrow+0.01, y1_max_with_borrow, 50)
+        util1_with_borrow = np.zeros_like(y1_values_with_borrow)
+        b1_values = np.zeros_like(y1_values_with_borrow)
+        
+        for i, y1 in enumerate(y1_values_with_borrow):
+            # Calculate required borrowing
+            payment_needed = py * y1
+            available_funds = m * self.phi_m + a
+            b1 = (payment_needed - available_funds) / self.phi_m
+            
+            # Calculate post-DM wealth and utility
+            post_wealth = 0  # All assets and money spent, only borrowed amount remains
+            util1_with_borrow[i] = self.utility_dm(y1) + self.interpolate_CM_value(post_wealth, -b1, e_idx)
+            b1_values[i] = b1
+        
+        # Find optimal y1 with borrowing
+        if len(util1_with_borrow) > 0:
+            best_idx = np.argmax(util1_with_borrow)
+            optimal_y1_with_borrow = y1_values_with_borrow[best_idx]
+            optimal_b1_with_borrow = b1_values[best_idx]
+            max_util1_with_borrow = util1_with_borrow[best_idx]
+        else:
+            optimal_y1_with_borrow = 0
+            optimal_b1_with_borrow = 0
+            max_util1_with_borrow = -np.inf
+        
+        # Compare utilities with and without borrowing
+        if max_util1_no_borrow >= max_util1_with_borrow:
+            optimal_y1 = optimal_y1_no_borrow
+            optimal_b1 = 0
+        else:
+            optimal_y1 = optimal_y1_with_borrow
+            optimal_b1 = optimal_b1_with_borrow
+        
+        # No preference shock case (depositor)
+        # Try different deposit amounts
+        d_max = m  # Can't deposit more money than you have
+        d_values = np.linspace(0, d_max, 50)
+        util_d = np.zeros_like(d_values)
+        
+        for i, d in enumerate(d_values):
+            # Calculate post-DM wealth
+            post_wealth = a + m * self.phi_m - d * self.phi_m
+            # Calculate utility (no early consumption utility)
+            util_d[i] = self.interpolate_CM_value(post_wealth, d, e_idx)
+        
+        # Find optimal d
+        if len(util_d) > 0:
+            best_idx = np.argmax(util_d)
+            optimal_d = d_values[best_idx]
+        else:
+            optimal_d = 0
+        
+        # Store optimal policies
+        self.policy_y[e_idx, a_idx, m_idx, 0] = optimal_y0
+        self.policy_y[e_idx, a_idx, m_idx, 1] = optimal_y1
+        self.policy_b[e_idx, a_idx, m_idx, 0] = optimal_b0
+        self.policy_b[e_idx, a_idx, m_idx, 1] = optimal_b1
+        self.policy_d[e_idx, a_idx, m_idx] = optimal_d
     
     def solve_bellman_iteration(self):
         """Solve the model using value function iteration"""
@@ -691,6 +828,10 @@ if __name__ == "__main__":
         'delta': 0.035, # job destruction rate
         'kappa': 7.29, # job posting cost
         'repl_rate': 0.4, # fraction of unemployment compensation / working wage income
+        'py': 1.0,  # price of early consumption goods
+        'Rl': 1.03,  # return on illiquid assets
+        'phi_m': 1.0,  # price of money
+        'i': 0.02,  # nominal interest rate
         'n_a': 50,
         'n_m': 30,
         'n_z': 3, # number of productivity states
