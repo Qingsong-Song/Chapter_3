@@ -59,12 +59,8 @@ class LagosWrightAiyagariSolver:
         self.Ag0 = params.get('Ag0', 1.0)  # Government bond supply
         taulumpsum = ((1.0 / self.prices[1]) - 1.0) * self.Ag0  # Revenue from money creation
         
-        # Apply lump-sum transfer to all households
-        self.tau = np.zeros((self.n_a, 2, self.n_z))
-        for z_idx in range(self.n_z):
-            for e_idx in range(2):
-                for a_idx in range(self.n_a):
-                    self.tau[a_idx, e_idx, z_idx] = taulumpsum
+        # Apply lump-sum transfer to all households using broadcasting
+        self.tau = np.full((self.n_a, 2, self.n_z), taulumpsum)
         
         # Full income (wages + transfers) for all states
         self.wages = np.zeros((self.n_a, 2, self.n_z))
@@ -542,6 +538,9 @@ class LagosWrightAiyagariSolver:
     
     def update_DM_value_function(self):
         """Update the DM value function V based on optimal DM policies"""
+        # Extract prices once outside loops
+        py, _, phi_m, _ = self.prices
+        
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
                 for a_idx in range(self.n_a):
@@ -550,53 +549,36 @@ class LagosWrightAiyagariSolver:
                         a = self.a_grid[a_idx]
                         m = self.m_grid[m_idx]
                         
-                        # Expected utility from preference shock cases
-                        expected_dm_utility = 0
-                        
-                        # Case ω=0 (only money accepted) with probability alpha_0
+                        # Case ω=0 (only money accepted)
                         y0 = self.policy_y[e_idx, a_idx, m_idx, z_idx, 0]
                         b0 = self.policy_b[e_idx, a_idx, m_idx, z_idx, 0]
+                        remain_m0 = m - y0 * py / phi_m
                         
-                        # Post-DM position for case ω=0
-                        remain_m0 = m - y0 * self.prices[0] / self.prices[2]
-                        remain_a0 = a
-                        D0 = -b0  # Negative D indicates loan
+                        # Combine utilities for ω=0
+                        util0 = self.utility_dm(y0) + self.interpolate_CM_value(e_idx, a, remain_m0, -b0, z_idx)
                         
-                        dm_utility0 = self.utility_dm(y0)
-                        cm_utility0 = self.interpolate_CM_value(e_idx, remain_a0, remain_m0, D0, z_idx)
-                        
-                        # Case ω=1 (both accepted) with probability alpha_1
+                        # Case ω=1 (both accepted)
                         y1 = self.policy_y[e_idx, a_idx, m_idx, z_idx, 1]
                         b1 = self.policy_b[e_idx, a_idx, m_idx, z_idx, 1]
                         
-                        # Calculate how payment is split between money and assets
-                        payment1 = self.prices[0] * y1
-                        money_payment1 = min(m * self.prices[2], payment1)
-                        asset_payment1 = min(a, payment1 - money_payment1)
-                        borrow_payment1 = payment1 - money_payment1 - asset_payment1
+                        # Calculate money and asset payments
+                        payment1 = py * y1
+                        money_payment1 = min(m * phi_m, payment1)
+                        remain_m1 = m - money_payment1 / phi_m
+                        remain_a1 = a - min(a, payment1 - money_payment1)
                         
-                        remain_m1 = m - money_payment1 / self.prices[2]
-                        remain_a1 = a - asset_payment1
-                        D1 = -b1  # Negative D indicates loan
+                        # Combine utilities for ω=1
+                        util1 = self.utility_dm(y1) + self.interpolate_CM_value(e_idx, remain_a1, remain_m1, -b1, z_idx)
                         
-                        dm_utility1 = self.utility_dm(y1)
-                        cm_utility1 = self.interpolate_CM_value(e_idx, remain_a1, remain_m1, D1, z_idx)
-                        
-                        # Depositor case with probability (1-alpha)
+                        # Depositor case
                         d = self.policy_d[e_idx, a_idx, m_idx, z_idx]
-                        remain_m_d = m - d
-                        D_d = d  # Positive D indicates deposit
+                        util_d = self.interpolate_CM_value(e_idx, a, m - d, d, z_idx)
                         
-                        cm_utility_d = self.interpolate_CM_value(e_idx, a, remain_m_d, D_d, z_idx)
-                        
-                        # Combine all cases to get expected value
-                        expected_value = \
-                            self.alpha_0 * (dm_utility0 + cm_utility0) + \
-                            self.alpha_1 * (dm_utility1 + cm_utility1) + \
-                            (1 - self.alpha) * cm_utility_d
-                        
-                        # Update DM value function
-                        self.V[e_idx, a_idx, m_idx, z_idx] = expected_value
+                        # Compute expected value (removed redundant variable)
+                        self.V[e_idx, a_idx, m_idx, z_idx] = \
+                            self.alpha_0 * util0 + \
+                            self.alpha_1 * util1 + \
+                            (1 - self.alpha) * util_d
     
     def update_CM_value_function(self):
         """Update the CM value function W based on optimal CM policies and DM value function"""
