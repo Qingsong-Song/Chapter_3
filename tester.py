@@ -1,120 +1,64 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 class LagosWrightAiyagariSolver:
     def __init__(self, params):
-        # Model parameters
-        self.beta = params.get('beta', 0.96)
-        self.alpha = params.get('alpha', 0.075)
-        self.alpha_1 = params.get('alpha_1', 0.06)
-        self.alpha_0 = self.alpha - self.alpha_1
+        """Initialize solver with model parameters"""
+        # Preference parameters
+        self.beta = params['beta']      # Discount factor
+        self.alpha = params['alpha']    # Probability of DM consumption opportunity
+        self.alpha_1 = params['alpha_1']  # Probability of accepting both money and assets
+        self.alpha_0 = self.alpha - self.alpha_1  # Probability of accepting only money
+        self.gamma = params['gamma']    # Risk aversion parameter
+        self.Psi = params['Psi']       # DM utility scaling parameter
         
-        self.gamma = params.get('gamma', 1.5)
-        self.Psi = params.get('Psi', 2.2)
-        self.psi = params.get('psi', 0.28)
-        self.zeta = params.get('zeta', 0.75)
-        self.nu = params.get('nu', 1.6)
-        self.mu = params.get('mu', 0.7)
-        self.delta = params.get('delta', 0.035)
-        self.kappa = params.get('kappa', 7.29)
-        
-        self.replace_rate = params.get('repl_rate', 0.4)
+        # Production and labor market parameters
+        self.psi = params['psi']       # Matching function elasticity
+        self.zeta = params['zeta']     # Worker bargaining power
+        self.nu = params['nu']         # Labor supply elasticity
+        self.mu = params['mu']         # Matching efficiency
+        self.delta = params['delta']   # Job separation rate
+        self.kappa = params['kappa']   # Vacancy posting cost
+        self.replace_rate = params['repl_rate']  # Unemployment benefit replacement rate
         
         # Grid specifications
-        self.n_a = params.get('n_a', 100)
-        self.n_m = params.get('n_m', 50)
-        self.n_D = params.get('n_D', 40)  # Grid size for deposits/loans
-        self.n_e = 2                      # Employment states: [0=unemployed, 1=employed]
-        self.n_z = 3                      # Skill types: [0=low, 1=medium, 2=high]
+        self.n_a = params['n_a']       # Number of asset grid points
+        self.n_m = params['n_m']       # Number of money grid points
+        self.n_D = params['n_D']       # Number of deposit/loan grid points
+        self.n_e = 2                   # Employment states: [0=unemployed, 1=employed]
+        self.n_z = 3                   # Skill types: [0=low, 1=medium, 2=high]
         
-        # Price parameters - stored as a vector for easier equilibrium solving
+        # Price parameters
         self.prices = np.array([
-            params.get('py', 1.0),      # Price of early consumption goods
-            params.get('Rl', 1.03),     # Return on illiquid assets
-            params.get('phi_m', 1.0),   # Price of money
-            params.get('i', 0.02)       # Nominal interest rate
+            params['py'],              # Price of DM goods
+            params['Rl'],             # Return on illiquid assets
+            params['phi_m'],          # Price of money
+            params['i']               # Nominal interest rate
         ])
         
         # Convergence parameters
-        self.max_iter = params.get('max_iter', 1000)
-        self.tol = params.get('tol', 1e-6)
+        self.max_iter = params['max_iter']
+        self.tol = params['tol']
         
         # Initialize grids
         self.setup_grids(params)
 
-        # Firm production and revenue calculations
-        self.Ys = self.κ_prime_inv(self.prices[0])
         
-        # Calculate firm revenue for each skill type
-        self.frev = np.zeros(self.n_z)
-        for z_idx in range(self.n_z):
-            self.frev[z_idx] = self.z_grid[z_idx] * (1.0 + self.prices[0] * self.Ys - self.κ_fun(np.array([self.Ys]))[0])
-        
-        # Calculate wages and unemployment benefits (base on labor share)
-        self.wages_bar = np.zeros((2, self.n_z))
-        self.wages_bar[1, :] = self.mu * self.frev  # Employed wage (labor share * revenue)
-        self.wages_bar[0, :] = self.replace_rate * self.wages_bar[1, :]  # Unemployed benefits
-        
-        # Taxes and transfers
-        self.Ag0 = params.get('Ag0', 1.0)  # Government bond supply
-        taulumpsum = ((1.0 / self.prices[1]) - 1.0) * self.Ag0  # Revenue from money creation
-        
-        # Apply lump-sum transfer to all households using broadcasting
-        self.tau = np.full((self.n_a, 2, self.n_z), taulumpsum)
-        
-        # Full income (wages + transfers) for all states
-        self.wages = np.zeros((self.n_a, 2, self.n_z))
-        for z_idx in range(self.n_z):
-            for e_idx in range(2):
-                self.wages[:, e_idx, z_idx] = self.wages_bar[e_idx, z_idx] + self.tau[:, e_idx, z_idx]
-        
-        # Firm profits and value
-        profits = self.frev - self.wages_bar[1, :]
-        self.Js = profits / (1.0 - ((1.0 - self.delta) / self.prices[1]))
-        
-        # Calculate steady state tightness and employment rate
-        # First check if the free-entry condition can be satisfied
-        entry_condition_max = np.max((self.z_grid * self.kappa * self.prices[1]) / self.Js)
-        
-        if entry_condition_max < 1:
-            # Use the first productivity type to determine tightness (should be the same for all z)
-            self.market_tightness = self.job_fill_inv((self.z_grid[0] * self.kappa * self.prices[1]) / self.Js[0])
-        else:
-            # If entry condition can't be satisfied, set very low tightness
-            self.market_tightness = 0.0001
-        
-        # Calculate job finding probability and employment rate
-        self.job_finding_prob = self.job_finding(self.market_tightness)
-        self.emp_rate = self.job_finding_prob / (self.delta + self.job_finding_prob)
-        
-        # Employment transition matrix: rows = current state, cols = next state
-        # [0,0] = P(unemployed → unemployed), [0,1] = P(unemployed → employed)
-        # [1,0] = P(employed → unemployed), [1,1] = P(employed → employed)
-        self.emp_transition = np.array([
-            [1 - self.job_finding_prob, self.job_finding_prob],
-            [self.delta, 1 - self.delta]
-        ])
-    
         # Initialize value and policy functions
         self.initialize_functions()
 
     
     def setup_grids(self, params):
         """Set up state space grids with appropriate spacing"""
-        # Asset grid (potentially non-uniform)
-        a_min = params.get('a_min', 0.0)
-        a_max = params.get('a_max', 20.0)
-        self.a_grid = np.linspace(a_min, a_max, self.n_a)
+        # Asset grid
+        self.a_grid = np.linspace(params['a_min'], params['a_max'], self.n_a)
         
         # Money holdings grid
-        m_min = params.get('m_min', 0.0)
-        m_max = params.get('m_max', 10.0)
-        self.m_grid = np.linspace(m_min, m_max, self.n_m)
+        self.m_grid = np.linspace(params['m_min'], params['m_max'], self.n_m)
         
         # Deposit/loan grid
-        D_min = params.get('D_min', -5.0)  # Negative values = loans
-        D_max = params.get('D_max', 5.0)   # Positive values = deposits
-        self.D_grid = np.linspace(D_min, D_max, self.n_D)
+        self.D_grid = np.linspace(params['D_min'], params['D_max'], self.n_D)
         
         # Employment grid
         self.e_grid = np.array([0, 1])  # 0 = unemployed, 1 = employed
@@ -124,6 +68,7 @@ class LagosWrightAiyagariSolver:
         
         # Skill type distribution (fixed - doesn't change over time)
         self.z_dist = np.array([0.62, 0.28, 0.1])  # Distribution of skill types
+
     
     def initialize_functions(self):
         """Initialize value and policy functions"""
@@ -132,14 +77,22 @@ class LagosWrightAiyagariSolver:
         self.V = np.zeros((self.n_e, self.n_a, self.n_m, self.n_z))
         
         # Initialize W with reasonable guesses using broadcasting
-        a_grid_reshaped = self.a_grid.reshape(-1, 1, 1)  # Shape for broadcasting
-        D_grid_reshaped = self.D_grid.reshape(1, -1, 1)  # Shape for broadcasting
+        a_grid_reshaped = self.a_grid.reshape(-1, 1)  # Shape: (n_a, 1)
+        D_grid_reshaped = self.D_grid.reshape(1, -1)  # Shape: (1, n_D)
         
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
                 # Calculate income and consumption guess using broadcasting
-                inc = self.wages[:, e_idx, z_idx].reshape(-1, 1)
-                c_guess = inc + 0.05 * (a_grid_reshaped + np.maximum(0, D_grid_reshaped) * self.prices[3])
+                inc = np.maximum(self.wages[:, e_idx, z_idx], 0.1)  # Ensure positive income
+                inc = inc.reshape(-1, 1)  # Shape: (n_a, 1)
+                
+                # Broadcasting: (n_a, n_D) with safety margin
+                c_guess = inc + 0.05 * (
+                    a_grid_reshaped + 
+                    np.maximum(0, D_grid_reshaped) * np.maximum(self.prices[3], 0.01)
+                )
+                c_guess = np.maximum(c_guess, 0.1)  # Ensure positive consumption
+                
                 self.W[e_idx, :, :, z_idx] = self.utility(c_guess) / (1 - self.beta)
         
         # Initialize policy functions
@@ -157,18 +110,24 @@ class LagosWrightAiyagariSolver:
         1. Utility function for centralised market
         2. c : endogenously determined by the skill type e, which impacts the budget constraint
         """
-        if c <= 0:
-            return -1e10  # Large negative value for infeasible consumption
-        return (c ** (1 - self.gamma) - 1) / (1 - self.gamma)
+        c = np.asarray(c)
+        # Add small epsilon to prevent division by zero
+        eps = 1e-10
+        safe_c = np.maximum(c, eps)
+        
+        return np.where(c <= 0,
+                    -1e5,  # penalty for non-positive consumption
+                    (safe_c ** (1 - self.gamma) - 1) / (1 - self.gamma))
     
     def utility_dm(self, y):
         """
         Utility function for decentralized market -- paramters are different from the centralised market
         Generates 26% increase in consumption during preference shocks.
         """
-        if y <= 0:
-            return 0  # No early consumption gives zero utility
-        return self.Psi * (y ** (1 - self.psi) - 1) / (1 - self.psi)
+        y = np.asarray(y)
+        return np.where(y <= 0,
+                    -1e5,  # penalty for no early consumption
+                    self.Psi * (y ** (1 - self.psi) - 1) / (1 - self.psi))
     
     def κ_prime_inv(self, py):
         """
@@ -339,7 +298,7 @@ class LagosWrightAiyagariSolver:
     def solve_dm_problem(self):
         """Solve DM problem for all states and update value function"""
         # Extract prices once outside loops
-        py, _, phi_m, i = self.prices
+        py, _, phi_m, _ = self.prices
         
         # Create meshgrid for vectorized operations
         e_grid, a_grid, m_grid, z_grid = np.meshgrid(
@@ -468,6 +427,9 @@ class LagosWrightAiyagariSolver:
     
     def update_CM_value_function(self):
         """Update the CM value function W based on optimal CM policies and DM value function"""
+        # Add diagnostics
+        W_min, W_max = np.inf, -np.inf
+        
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
                 for a_idx in range(self.n_a):
@@ -502,8 +464,18 @@ class LagosWrightAiyagariSolver:
                             # Add continuation value weighted by transition probability
                             continuation_value += prob * self.V[next_e_idx, a_next_idx, m_next_idx, z_idx]
                         
-                        # Update W (CM value function)
-                        self.W[e_idx, a_idx, D_idx, z_idx] = cm_utility + self.beta * continuation_value
+                        # Store old value for damping
+                        old_value = self.W[e_idx, a_idx, D_idx, z_idx]
+                        
+                        # Calculate new value
+                        new_value = cm_utility + self.beta * continuation_value
+                        
+                        # Apply damping to slow down updates and prevent oscillations
+                        damping_factor = 0.7  # Adjust between 0 and 1 (higher = more damping)
+                        damped_value = damping_factor * old_value + (1 - damping_factor) * new_value
+                        
+                        # Additionally apply bounds if needed
+                        self.W[e_idx, a_idx, D_idx, z_idx] = np.clip(damped_value, -1e6, 1e6)
     
     def solve_cm_problem(self, e_idx, a_idx, D_idx, z_idx):
         """
@@ -564,18 +536,15 @@ class LagosWrightAiyagariSolver:
                 # Calculate current utility
                 current_utility = self.utility(c)
                 
-                # Calculate expected continuation value (across future employment states)
-                continuation_value = 0
-                for next_e_idx in range(self.n_e):
-                    # Probability of transitioning to employment state next_e_idx
-                    prob = self.emp_transition[e_idx, next_e_idx]
-                    
-                    # Find indices for next-period values
-                    a_next_idx = self.find_nearest_index(self.a_grid, a_next)
-                    m_next_idx = self.find_nearest_index(self.m_grid, m_next)
-                    
-                    # Add continuation value weighted by transition probability
-                    continuation_value += prob * self.V[next_e_idx, a_next_idx, m_next_idx, z_idx]
+                # Calculate expected continuation value more efficiently
+                a_next_idx = self.find_nearest_index(self.a_grid, a_next)
+                m_next_idx = self.find_nearest_index(self.m_grid, m_next)
+                
+                # Get continuation values for both employment states
+                next_values = self.V[:, a_next_idx, m_next_idx, z_idx]
+                
+                # Multiply with transition probabilities for current employment state
+                continuation_value = np.dot(self.emp_transition[e_idx], next_values)
                 
                 # Total utility including continuation value
                 total_utility = current_utility + self.beta * continuation_value
@@ -643,6 +612,64 @@ class LagosWrightAiyagariSolver:
             if len(indices) == 0:
                 return 0
             return indices[-1]
+
+    def market_clearing(self, ):
+        """
+        Solve for the equilibrium market tightness that clears the labor market.
+        """
+        # Firm production and revenue calculations
+        self.Ys = self.κ_prime_inv(self.prices[0])
+        
+        # Calculate firm revenue for each skill type
+        self.frev = np.zeros(self.n_z)
+        for z_idx in range(self.n_z):
+            self.frev[z_idx] = self.z_grid[z_idx] * (1.0 + self.prices[0] * self.Ys - self.κ_fun(np.array([self.Ys]))[0])
+        
+        # Calculate wages and unemployment benefits (base on labor share)
+        self.wages_bar = np.zeros((2, self.n_z))
+        self.wages_bar[1, :] = self.mu * self.frev  # Employed wage (labor share * revenue)
+        self.wages_bar[0, :] = self.replace_rate * self.wages_bar[1, :]  # Unemployed benefits
+        
+        # Taxes and transfers
+        self.Ag0 = params['Ag0']  # Government bond supply
+        taulumpsum = ((1.0 / self.prices[1]) - 1.0) * self.Ag0  # Revenue from money creation
+        
+        # Apply lump-sum transfer to all households using broadcasting
+        self.tau = np.full((self.n_a, 2, self.n_z), taulumpsum)
+        
+        # Full income (wages + transfers) for all states
+        self.wages = np.zeros((self.n_a, 2, self.n_z))
+        for z_idx in range(self.n_z):
+            for e_idx in range(2):
+                self.wages[:, e_idx, z_idx] = self.wages_bar[e_idx, z_idx] + self.tau[:, e_idx, z_idx]
+        
+        # Firm profits and value
+        profits = self.frev - self.wages_bar[1, :]
+        self.Js = profits / (1.0 - ((1.0 - self.delta) / self.prices[1]))
+        
+        # Calculate steady state tightness and employment rate
+        # First check if the free-entry condition can be satisfied
+        entry_condition_max = np.max((self.z_grid * self.kappa * self.prices[1]) / self.Js)
+        
+        if entry_condition_max < 1:
+            # Use the first productivity type to determine tightness (should be the same for all z)
+            self.market_tightness = self.job_fill_inv((self.z_grid[0] * self.kappa * self.prices[1]) / self.Js[0])
+        else:
+            # If entry condition can't be satisfied, set very low tightness
+            self.market_tightness = 0.0001
+        
+        # Calculate job finding probability and employment rate
+        self.job_finding_prob = self.job_finding(self.market_tightness)
+        self.emp_rate = self.job_finding_prob / (self.delta + self.job_finding_prob)
+        
+        # Employment transition matrix: rows = current state, cols = next state
+        # [0,0] = P(unemployed → unemployed), [0,1] = P(unemployed → employed)
+        # [1,0] = P(employed → unemployed), [1,1] = P(employed → employed)
+        self.emp_transition = np.array([
+            [1 - self.job_finding_prob, self.job_finding_prob],
+            [self.delta, 1 - self.delta]
+        ])
+    
     
 
     def visualize_convergence(self, iter_count):
@@ -877,28 +904,6 @@ class LagosWrightAiyagariSolver:
                 # For ω=1
                 im1 = axes[1].imshow(
                     self.policy_y[e_idx, :, :, z_idx, 1],
-                    extent=[self.m_grid[0], self.m_grid[-1], self.a_grid[0], self.a_grid[-1]],
-                    aspect='auto',
-                    origin='lower',
-                    cmap='viridis'
-                )
-                axes[1].set_title(f'Early Consumption (ω=1, {employment_status}, Skill {z_idx})')
-                axes[1].set_xlabel('Money Holdings')
-                axes[1].set_ylabel('Asset Holdings')
-                plt.colorbar(im1, ax=axes[1])
-                
-                plt.tight_layout()
-                plt.savefig(f'visualizations/heatmap_consumption_{employment_status}_skill_{z_idx}.png')
-                plt.close()
-                
-                # Borrowing and deposit heat maps
-                fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-                
-                # Borrowing for ω=0
-                im0 = axes[0].imshow(
-                    self.policy_b[e_idx, :, :, z_idx, 0],
-                    extent=[self.m_grid[0], self.m_grid[-1], self.a_grid[0], self.a_grid[-1]],
-                    aspect='auto',
                     origin='lower',
                     cmap='coolwarm'
                 )
@@ -1059,44 +1064,47 @@ class LagosWrightAiyagariSolver:
 
 if __name__ == "__main__":
     params = {
-        'beta': 0.96,
-        'alpha': 0.075,
-        'alpha_1': 0.06,
-        'gamma': 1.5,
-        'Psi': 2.2,
-        'psi': 0.28,
-        'zeta': 0.75,
-        'nu': 1.6,
-        'mu': 0.7,
-        'delta': 0.035,
-        'kappa': 7.29,
-        'repl_rate': 0.4,
+        # Preference parameters
+        'beta': 0.96,      # Discount factor
+        'alpha': 0.075,    # Probability of DM consumption opportunity
+        'alpha_1': 0.06,   # Probability of accepting both money and assets
+        'gamma': 1.5,      # Risk aversion parameter
+        'Psi': 2.2,       # DM utility scaling parameter
+        
+        # Production and labor market parameters
+        'psi': 0.28,      # Matching function elasticity
+        'zeta': 0.75,     # Worker bargaining power
+        'nu': 1.6,        # Labor supply elasticity
+        'mu': 0.7,        # Matching efficiency
+        'delta': 0.035,   # Job separation rate
+        'kappa': 7.29,    # Vacancy posting cost
+        'repl_rate': 0.4, # Unemployment benefit replacement rate
         
         # Grid specifications
-        'n_a': 100,
-        'n_m': 50,
-        'n_D': 40,
-        'a_min': 0.0,
-        'a_max': 20.0,
-        'm_min': 0.0,
-        'm_max': 10.0,
-        'D_min': -5.0,
-        'D_max': 5.0,
+        'n_a': 100,       # Number of asset grid points
+        'n_m': 50,        # Number of money grid points
+        'n_D': 40,        # Number of deposit/loan grid points
+        'a_min': 0.0,     # Minimum asset value
+        'a_max': 20.0,    # Maximum asset value
+        'm_min': 0.0,     # Minimum money holdings
+        'm_max': 10.0,    # Maximum money holdings
+        'D_min': -5.0,    # Minimum deposit/loan value
+        'D_max': 5.0,     # Maximum deposit/loan value
         
-        # Initial prices
-        'py': 1.2,      # Price of early consumption
-        'Rl': 1.03,     # Illiquid asset return
-        'phi_m': 1.0,   # Money price
-        'i': 0.02,      # Nominal interest rate
-        
-        # Additional needed parameters
-        'w1': 1.0,      # Wage for employed workers (base wage)
-        'w0': 0.4,      # Unemployment benefits (as percentage of w1)
-        
+        # Price parameters
+        'py': 1.0,        # Price of DM goods
+        'Rl': 1.03,       # Return on illiquid assets
+        'phi_m': 1.0,     # Price of money
+        'i': 0.02,        # Nominal interest rate
+
+        # Government Spending
+        'Ag0': 0.1,      # Exogenous government spending 
+
         # Convergence parameters
         'max_iter': 500,
         'tol': 1e-5
     }
+
     
     solver = LagosWrightAiyagariSolver(params)
     
