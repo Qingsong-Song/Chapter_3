@@ -671,7 +671,6 @@ class LagosWrightAiyagariSolver:
         ])
     
     
-
     def visualize_convergence(self, iter_count):
         """Generate visualizations to track convergence progress"""
         # Only show for selected states to avoid clutter
@@ -1126,3 +1125,153 @@ if __name__ == "__main__":
     plt.show()
     
     print("Model solution complete. Visualizations saved to 'visualizations' folder.")
+
+
+def solve_dm_problem(self, e_idx, z_idx, a_m_idx, a_l_idx):
+    """
+    Solve the decentralized market problem for a given state (e,z,a^m,a^l).
+    
+    In the DM context:
+    - a^m = real money holdings
+    - a^l = real illiquid asset holdings
+    - Total real wealth depends on which assets are accepted
+    """
+    # Extract state variables
+    e = self.e_grid[e_idx]  # Employment status
+    z = self.z_grid[z_idx]  # Skill type (affects income)
+    a_m = self.a_m_grid[a_m_idx]  # Real money holdings
+    a_l = self.a_l_grid[a_l_idx]  # Real illiquid asset holdings
+    
+    # Extract prices from vector
+    py = self.prices[0]   # Price of early consumption goods
+    Rl = self.prices[1]   # Return on illiquid assets
+    phi_m = self.prices[2]  # Price of money
+    i = self.prices[3]    # Nominal interest rate
+    
+    # Initialize arrays to store results
+    # For ω=0 case (only money accepted)
+    optimal_y0 = 0
+    optimal_b0 = 0
+    max_util0 = -np.inf
+    
+    # PART 1: CASE ω=0 (ONLY MONEY IS ACCEPTED)
+    # ------------------------------------------------------------------------
+    
+    # Define utility function for non-borrowing scenario (ω=0)
+    def utility_without_borrowing_w0(y):
+        """
+        Calculate utility when consuming y without borrowing in the ω=0 case.
+        Only money is accepted as payment.
+        """
+        # Check if consumption is feasible
+        if py * y > a_m:
+            return -np.inf  # Infeasible
+        
+        # Calculate post-DM wealth
+        a_post = a_l  # Illiquid assets remain unchanged
+        D = 0  # No borrowing or depositing
+        b = 0  # No borrowing
+        
+        # Calculate real money remaining after consumption
+        m_post = a_m - py * y
+        
+        # Total utility: early consumption utility + CM value function
+        dm_utility = self.utility_dm(y)
+        cm_utility = self.interpolate_CM_value(a_post, m_post, D, e_idx, z_idx)
+        
+        return dm_utility + cm_utility
+    
+    # Define utility function for borrowing scenario (ω=0)
+    def utility_with_borrowing_w0(y, b):
+        """
+        Calculate utility when consuming y with borrowing b in the ω=0 case.
+        Only money is accepted as payment, but borrowing can supplement.
+        """
+        # Calculate real money available including borrowing
+        total_money = a_m + phi_m * b
+        
+        # Check if feasible with borrowing
+        if py * y > total_money:
+            return -np.inf  # Still infeasible
+        
+        # Calculate post-DM state
+        a_post = a_l  # Illiquid assets remain unchanged
+        D = -b  # Negative D indicates loan
+        m_post = total_money - py * y  # Remaining money after consumption
+        
+        # Total utility: early consumption utility + CM value function
+        dm_utility = self.utility_dm(y)
+        cm_utility = self.interpolate_CM_value(a_post, m_post, D, e_idx, z_idx)
+        
+        return dm_utility + cm_utility
+    
+    # STEP 1: Find optimal consumption WITHOUT borrowing (ω=0)
+    # ------------------------------------------------------------------------
+    # Maximum consumption feasible without borrowing
+    y0_max_no_borrow = a_m / py
+    
+    # Create grid of possible consumption values
+    y0_grid_no_borrow = np.linspace(0, y0_max_no_borrow, 50)
+    
+    # Evaluate utility for each consumption level
+    util0_no_borrow = np.array([utility_without_borrowing_w0(y) for y in y0_grid_no_borrow])
+    
+    # Find the optimal consumption level (if any feasible options exist)
+    if np.max(util0_no_borrow) > -np.inf:
+        best_idx = np.argmax(util0_no_borrow)
+        optimal_y0_no_borrow = y0_grid_no_borrow[best_idx]
+        max_util0_no_borrow = util0_no_borrow[best_idx]
+    else:
+        optimal_y0_no_borrow = 0
+        max_util0_no_borrow = utility_without_borrowing_w0(0)
+    
+    # STEP 2: Find optimal consumption WITH borrowing (ω=0)
+    # ------------------------------------------------------------------------
+    # Only consider borrowing if it might be beneficial
+    if y0_max_no_borrow < self.max_y_utility:  # where max_y_utility is a pre-computed value
+        # Set a reasonable upper bound for consumption with borrowing
+        y0_max_with_borrow = min(3 * y0_max_no_borrow, self.max_y)
+        
+        # Create a grid of consumption values requiring borrowing
+        y0_values = np.linspace(y0_max_no_borrow + 0.01, y0_max_with_borrow, 50)
+        
+        # Find the best (y, b) combination
+        max_util0_with_borrow = -np.inf
+        optimal_y0_with_borrow = 0
+        optimal_b0_with_borrow = 0
+        
+        for y in y0_values:
+            # Calculate required borrowing for this consumption level
+            required_money = py * y
+            needed_to_borrow = max(0, (required_money - a_m) / phi_m)
+            
+            # Calculate utility with this borrowing amount
+            util = utility_with_borrowing_w0(y, needed_to_borrow)
+            
+            # Update if better
+            if util > max_util0_with_borrow:
+                max_util0_with_borrow = util
+                optimal_y0_with_borrow = y
+                optimal_b0_with_borrow = needed_to_borrow
+    else:
+        # No need to borrow if money is abundant
+        max_util0_with_borrow = -np.inf
+        optimal_y0_with_borrow = 0
+        optimal_b0_with_borrow = 0
+    
+    # STEP 3: Compare with and without borrowing scenarios
+    # ------------------------------------------------------------------------
+    if max_util0_no_borrow >= max_util0_with_borrow:
+        # Without borrowing is better (or equal)
+        optimal_y0 = optimal_y0_no_borrow
+        optimal_b0 = 0
+        max_util0 = max_util0_no_borrow
+    else:
+        # With borrowing is better
+        optimal_y0 = optimal_y0_with_borrow
+        optimal_b0 = optimal_b0_with_borrow
+        max_util0 = max_util0_with_borrow
+    
+    # Store the optimal policy for ω=0 case
+    self.policy_y[e_idx, z_idx, a_m_idx, a_l_idx, 0] = optimal_y0
+    self.policy_b[e_idx, z_idx, a_m_idx, a_l_idx, 0] = optimal_b0

@@ -812,6 +812,397 @@ class LagosWrightAiyagariSolver:
             'phi_m': self.phi_m,
             'interest_rate': self.interest_rate
         }
+    
+
+    def visualize_convergence(self, iter_count):
+        """Generate visualizations to track convergence progress"""
+        # Only show for selected states to avoid clutter
+        e_idx = 1  # Employed
+        z_idx = 1  # Medium skill
+        
+        plt.figure(figsize=(15, 10))
+        
+        # Plot W value function for different asset levels
+        plt.subplot(2, 2, 1)
+        D_idx = self.n_D // 2  # Mid-point of deposit grid
+        plt.plot(self.a_grid, self.W[0, :, D_idx, z_idx], 'b-', label='Unemployed')
+        plt.plot(self.a_grid, self.W[1, :, D_idx, z_idx], 'r-', label='Employed')
+        plt.title(f'CM Value Function (Iteration {iter_count})')
+        plt.xlabel('Assets')
+        plt.ylabel('Value')
+        plt.legend()
+        
+        # Plot V value function
+        plt.subplot(2, 2, 2)
+        m_idx = self.n_m // 2  # Mid-point of money grid
+        plt.plot(self.a_grid, self.V[0, :, m_idx, z_idx], 'b-', label='Unemployed')
+        plt.plot(self.a_grid, self.V[1, :, m_idx, z_idx], 'r-', label='Employed')
+        plt.title('DM Value Function')
+        plt.xlabel('Assets')
+        plt.ylabel('Value')
+        plt.legend()
+        
+        # Plot consumption policy
+        plt.subplot(2, 2, 3)
+        plt.plot(self.a_grid, self.policy_c[0, :, D_idx, z_idx], 'b-', label='Unemployed')
+        plt.plot(self.a_grid, self.policy_c[1, :, D_idx, z_idx], 'r-', label='Employed')
+        plt.title('Consumption Policy')
+        plt.xlabel('Assets')
+        plt.ylabel('Consumption')
+        plt.legend()
+        
+        # Plot next period asset policy
+        plt.subplot(2, 2, 4)
+        plt.plot(self.a_grid, self.policy_a_next[0, :, D_idx, z_idx], 'b-', label='Unemployed')
+        plt.plot(self.a_grid, self.policy_a_next[1, :, D_idx, z_idx], 'r-', label='Employed')
+        plt.plot(self.a_grid, self.a_grid, 'k--', label='45-degree line')
+        plt.title('Next Period Assets Policy')
+        plt.xlabel('Current Assets')
+        plt.ylabel('Next Period Assets')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(f'convergence_iter_{iter_count}.png')
+        plt.close()
+
+    def visualize_solution(self):
+        """Generate comprehensive visualizations to verify economic sensibility of the solution"""
+        # Create a folder for visualizations if it doesn't exist
+        import os
+        os.makedirs('visualizations', exist_ok=True)
+        
+        # 1. Value Functions
+        plt.figure(figsize=(15, 12))
+        
+        # Plot CM value function (W) by employment and skill
+        for z_idx in range(self.n_z):
+            plt.subplot(3, 2, z_idx*2 + 1)
+            D_idx = self.n_D // 2  # Middle of deposit grid
+            plt.plot(self.a_grid, self.W[0, :, D_idx, z_idx], 'b-', label='Unemployed')
+            plt.plot(self.a_grid, self.W[1, :, D_idx, z_idx], 'r-', label='Employed')
+            plt.title(f'CM Value Function (Skill Level {z_idx})')
+            plt.xlabel('Assets')
+            plt.ylabel('Value')
+            plt.legend()
+            
+            # Plot DM value function (V) by employment and skill
+            plt.subplot(3, 2, z_idx*2 + 2)
+            m_idx = self.n_m // 2  # Middle of money grid
+            plt.plot(self.a_grid, self.V[0, :, m_idx, z_idx], 'b-', label='Unemployed')
+            plt.plot(self.a_grid, self.V[1, :, m_idx, z_idx], 'r-', label='Employed')
+            plt.title(f'DM Value Function (Skill Level {z_idx})')
+            plt.xlabel('Assets')
+            plt.ylabel('Value')
+            plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig('visualizations/value_functions.png')
+        plt.close()
+        
+        # 2. CM Policy Functions
+        plt.figure(figsize=(15, 12))
+        
+        # Plot consumption policy
+        for z_idx in range(self.n_z):
+            plt.subplot(3, 2, z_idx*2 + 1)
+            D_idx = self.n_D // 2  # Middle of deposit grid
+            plt.plot(self.a_grid, self.policy_c[0, :, D_idx, z_idx], 'b-', label='Unemployed')
+            plt.plot(self.a_grid, self.policy_c[1, :, D_idx, z_idx], 'r-', label='Employed')
+            plt.title(f'Consumption Policy (Skill Level {z_idx})')
+            plt.xlabel('Assets')
+            plt.ylabel('Consumption')
+            plt.legend()
+            
+            # Plot asset policy with 45-degree line
+            plt.subplot(3, 2, z_idx*2 + 2)
+            plt.plot(self.a_grid, self.policy_a_next[0, :, D_idx, z_idx], 'b-', label='Unemployed')
+            plt.plot(self.a_grid, self.policy_a_next[1, :, D_idx, z_idx], 'r-', label='Employed')
+            plt.plot(self.a_grid, self.a_grid, 'k--', label='45-degree line')
+            plt.title(f'Next Period Assets (Skill Level {z_idx})')
+            plt.xlabel('Current Assets')
+            plt.ylabel('Next Period Assets')
+            plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig('visualizations/cm_policies.png')
+        plt.close()
+        
+        # 3. Money Policies
+        plt.figure(figsize=(15, 12))
+        
+        # Plot money holding policy
+        for z_idx in range(self.n_z):
+            plt.subplot(3, 2, z_idx*2 + 1)
+            D_idx = self.n_D // 2  # Middle of deposit grid
+            plt.plot(self.a_grid, self.policy_m_next[0, :, D_idx, z_idx], 'b-', label='Unemployed')
+            plt.plot(self.a_grid, self.policy_m_next[1, :, D_idx, z_idx], 'r-', label='Employed')
+            plt.title(f'Money Holding Policy (Skill Level {z_idx})')
+            plt.xlabel('Assets')
+            plt.ylabel('Next Period Money')
+            plt.legend()
+            
+            # Plot money-to-asset ratio
+            plt.subplot(3, 2, z_idx*2 + 2)
+            money_ratio_unemployed = self.policy_m_next[0, :, D_idx, z_idx] / (self.policy_a_next[0, :, D_idx, z_idx] + 1e-8)
+            money_ratio_employed = self.policy_m_next[1, :, D_idx, z_idx] / (self.policy_a_next[1, :, D_idx, z_idx] + 1e-8)
+            plt.plot(self.a_grid, money_ratio_unemployed, 'b-', label='Unemployed')
+            plt.plot(self.a_grid, money_ratio_employed, 'r-', label='Employed')
+            plt.title(f'Money-to-Asset Ratio (Skill Level {z_idx})')
+            plt.xlabel('Assets')
+            plt.ylabel('Money/Assets Ratio')
+            plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig('visualizations/money_policies.png')
+        plt.close()
+        
+        # 4. DM Policy Functions by Skill Type
+        for z_idx in range(self.n_z):
+            plt.figure(figsize=(15, 12))
+            
+            # Early consumption when only money accepted (ω=0)
+            plt.subplot(3, 2, 1)
+            a_idx = self.n_a // 2  # Middle of asset grid
+            plt.plot(self.m_grid, self.policy_y[0, a_idx, :, z_idx, 0], 'b-', label='Unemployed')
+            plt.plot(self.m_grid, self.policy_y[1, a_idx, :, z_idx, 0], 'r-', label='Employed')
+            plt.title(f'Early Consumption (ω=0, Skill Level {z_idx})')
+            plt.xlabel('Money Holdings')
+            plt.ylabel('Consumption in DM')
+            plt.legend()
+            
+            # Early consumption when both assets accepted (ω=1)
+            plt.subplot(3, 2, 2)
+            plt.plot(self.m_grid, self.policy_y[0, a_idx, :, z_idx, 1], 'b-', label='Unemployed')
+            plt.plot(self.m_grid, self.policy_y[1, a_idx, :, z_idx, 1], 'r-', label='Employed')
+            plt.title(f'Early Consumption (ω=1, Skill Level {z_idx})')
+            plt.xlabel('Money Holdings')
+            plt.ylabel('Consumption in DM')
+            plt.legend()
+            
+            # Borrowing when only money accepted (ω=0)
+            plt.subplot(3, 2, 3)
+            plt.plot(self.m_grid, self.policy_b[0, a_idx, :, z_idx, 0], 'b-', label='Unemployed')
+            plt.plot(self.m_grid, self.policy_b[1, a_idx, :, z_idx, 0], 'r-', label='Employed')
+            plt.title(f'Borrowing (ω=0, Skill Level {z_idx})')
+            plt.xlabel('Money Holdings')
+            plt.ylabel('Borrowing Amount')
+            plt.legend()
+            
+            # Borrowing when both assets accepted (ω=1)
+            plt.subplot(3, 2, 4)
+            plt.plot(self.m_grid, self.policy_b[0, a_idx, :, z_idx, 1], 'b-', label='Unemployed')
+            plt.plot(self.m_grid, self.policy_b[1, a_idx, :, z_idx, 1], 'r-', label='Employed')
+            plt.title(f'Borrowing (ω=1, Skill Level {z_idx})')
+            plt.xlabel('Money Holdings')
+            plt.ylabel('Borrowing Amount')
+            plt.legend()
+            
+            # Deposit policy
+            plt.subplot(3, 2, 5)
+            plt.plot(self.m_grid, self.policy_d[0, a_idx, :, z_idx], 'b-', label='Unemployed')
+            plt.plot(self.m_grid, self.policy_d[1, a_idx, :, z_idx], 'r-', label='Employed')
+            plt.title(f'Deposit Policy (Skill Level {z_idx})')
+            plt.xlabel('Money Holdings')
+            plt.ylabel('Deposit Amount')
+            plt.legend()
+            
+            # Deposit-to-money ratio
+            plt.subplot(3, 2, 6)
+            deposit_ratio_unemployed = self.policy_d[0, a_idx, :, z_idx] / (self.m_grid + 1e-8)
+            deposit_ratio_employed = self.policy_d[1, a_idx, :, z_idx] / (self.m_grid + 1e-8)
+            plt.plot(self.m_grid, deposit_ratio_unemployed, 'b-', label='Unemployed')
+            plt.plot(self.m_grid, deposit_ratio_employed, 'r-', label='Employed')
+            plt.title(f'Deposit-to-Money Ratio (Skill Level {z_idx})')
+            plt.xlabel('Money Holdings')
+            plt.ylabel('Deposit/Money Ratio')
+            plt.legend()
+            
+            plt.tight_layout()
+            plt.savefig(f'visualizations/dm_policies_skill_{z_idx}.png')
+            plt.close()
+        
+        # 5. Heat Maps for Policy Functions
+        # This helps visualize how policies change across both asset and money dimensions
+        for z_idx in range(self.n_z):
+            for e_idx in range(self.n_e):
+                employment_status = "Employed" if e_idx == 1 else "Unemployed"
+                
+                # Early consumption heat maps
+                fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+                
+                # For ω=0
+                im0 = axes[0].imshow(
+                    self.policy_y[e_idx, :, :, z_idx, 0],
+                    extent=[self.m_grid[0], self.m_grid[-1], self.a_grid[0], self.a_grid[-1]],
+                    aspect='auto',
+                    origin='lower',
+                    cmap='viridis'
+                )
+                axes[0].set_title(f'Early Consumption (ω=0, {employment_status}, Skill {z_idx})')
+                axes[0].set_xlabel('Money Holdings')
+                axes[0].set_ylabel('Asset Holdings')
+                plt.colorbar(im0, ax=axes[0])
+                
+                # For ω=1
+                im1 = axes[1].imshow(
+                    self.policy_y[e_idx, :, :, z_idx, 1],
+                    origin='lower',
+                    cmap='coolwarm'
+                )
+                axes[0].set_title(f'Borrowing (ω=0, {employment_status}, Skill {z_idx})')
+                axes[0].set_xlabel('Money Holdings')
+                axes[0].set_ylabel('Asset Holdings')
+                plt.colorbar(im0, ax=axes[0])
+                
+                # Borrowing for ω=1
+                im1 = axes[1].imshow(
+                    self.policy_b[e_idx, :, :, z_idx, 1],
+                    extent=[self.m_grid[0], self.m_grid[-1], self.a_grid[0], self.a_grid[-1]],
+                    aspect='auto',
+                    origin='lower',
+                    cmap='coolwarm'
+                )
+                axes[1].set_title(f'Borrowing (ω=1, {employment_status}, Skill {z_idx})')
+                axes[1].set_xlabel('Money Holdings')
+                axes[1].set_ylabel('Asset Holdings')
+                plt.colorbar(im1, ax=axes[1])
+                
+                # Deposits
+                im2 = axes[2].imshow(
+                    self.policy_d[e_idx, :, :, z_idx],
+                    extent=[self.m_grid[0], self.m_grid[-1], self.a_grid[0], self.a_grid[-1]],
+                    aspect='auto',
+                    origin='lower',
+                    cmap='viridis'
+                )
+                axes[2].set_title(f'Deposits ({employment_status}, Skill {z_idx})')
+                axes[2].set_xlabel('Money Holdings')
+                axes[2].set_ylabel('Asset Holdings')
+                plt.colorbar(im2, ax=axes[2])
+                
+                plt.tight_layout()
+                plt.savefig(f'visualizations/heatmap_borrowing_deposit_{employment_status}_skill_{z_idx}.png')
+                plt.close()
+
+    def diagnostic_pre_dm(self, iter_count):
+        """Economic diagnostic checks before DM stage"""
+        os.makedirs('diagnostics', exist_ok=True)
+        
+        plt.figure(figsize=(15, 10))
+        
+        # 1. Check wage distribution
+        plt.subplot(2, 2, 1)
+        for z_idx in range(self.n_z):
+            plt.plot(self.a_grid, self.wages[:, 1, z_idx], label=f'Skill {z_idx}')
+        plt.title('Wage Distribution by Skill Level')
+        plt.xlabel('Assets')
+        plt.ylabel('Wage')
+        plt.legend()
+        
+        # 2. Check resource feasibility
+        plt.subplot(2, 2, 2)
+        z_idx = 1  # Medium skill
+        plt.plot(self.a_grid, self.wages[:, 0, z_idx], label='Unemployed')
+        plt.plot(self.a_grid, self.wages[:, 1, z_idx], label='Employed')
+        plt.title('Wage Gap (Medium Skill)')
+        plt.xlabel('Assets')
+        plt.ylabel('Wage')
+        plt.legend()
+        
+        # 3. Value function shape check
+        plt.subplot(2, 2, 3)
+        D_idx = self.n_D // 2
+        for z_idx in range(self.n_z):
+            plt.plot(self.a_grid, self.W[1, :, D_idx, z_idx], label=f'Skill {z_idx}')
+        plt.title('Value Function by Skill (Employed)')
+        plt.xlabel('Assets')
+        plt.ylabel('Value')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(f'diagnostics/pre_dm_iter_{iter_count}.png')
+        plt.close()
+
+    def diagnostic_post_dm(self, iter_count):
+        """Economic diagnostic checks after DM stage"""
+        plt.figure(figsize=(15, 10))
+        
+        # 1. DM consumption policy check
+        z_idx = 1  # Medium skill
+        plt.subplot(2, 2, 1)
+        a_idx = self.n_a // 2  # Middle of asset grid
+        plt.plot(self.m_grid, self.policy_y[0, a_idx, :, z_idx, 0], label='Unemployed ω=0')
+        plt.plot(self.m_grid, self.policy_y[1, a_idx, :, z_idx, 0], label='Employed ω=0')
+        plt.title('DM Consumption (Money Only)')
+        plt.xlabel('Money Holdings')
+        plt.ylabel('Consumption')
+        plt.legend()
+        
+        # 2. Money holdings distribution
+        plt.subplot(2, 2, 2)
+        m_idx = self.n_m // 2
+        for z_idx in range(self.n_z):
+            plt.plot(self.a_grid, self.V[1, :, m_idx, z_idx], label=f'Skill {z_idx}')
+        plt.title('DM Value by Skill Level')
+        plt.xlabel('Assets')
+        plt.ylabel('Value')
+        plt.legend()
+        
+        # 3. Borrowing policy check
+        plt.subplot(2, 2, 3)
+        plt.plot(self.m_grid, self.policy_b[0, a_idx, :, z_idx, 0], label='Unemployed ω=0')
+        plt.plot(self.m_grid, self.policy_b[1, a_idx, :, z_idx, 0], label='Employed ω=0')
+        plt.title('Borrowing Policy')
+        plt.xlabel('Money Holdings')
+        plt.ylabel('Borrowing Amount')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(f'diagnostics/post_dm_iter_{iter_count}.png')
+        plt.close()
+
+    def diagnostic_post_cm(self, iter_count):
+        """Economic diagnostic checks after CM stage"""
+        plt.figure(figsize=(15, 10))
+        
+        # 1. Consumption policy check
+        z_idx = 1  # Medium skill
+        D_idx = self.n_D // 2
+        plt.subplot(2, 2, 1)
+        plt.plot(self.a_grid, self.policy_c[0, :, D_idx, z_idx], label='Unemployed')
+        plt.plot(self.a_grid, self.policy_c[1, :, D_idx, z_idx], label='Employed')
+        plt.title('CM Consumption Policy')
+        plt.xlabel('Assets')
+        plt.ylabel('Consumption')
+        plt.legend()
+        
+        # 2. Asset accumulation check
+        plt.subplot(2, 2, 2)
+        plt.plot(self.a_grid, self.policy_a_next[0, :, D_idx, z_idx], label='Unemployed')
+        plt.plot(self.a_grid, self.policy_a_next[1, :, D_idx, z_idx], label='Employed')
+        plt.plot(self.a_grid, self.a_grid, 'k--', label='45° line')
+        plt.title('Asset Accumulation')
+        plt.xlabel('Current Assets')
+        plt.ylabel('Next Period Assets')
+        plt.legend()
+        
+        # 3. Budget constraint check
+        plt.subplot(2, 2, 3)
+        resources = self.wages[:, 1, z_idx]  # Employed resources
+        portfolio = (self.policy_a_next[1, :, D_idx, z_idx] / self.prices[1] + 
+                    self.policy_m_next[1, :, D_idx, z_idx] * self.prices[2])
+        plt.plot(self.a_grid, resources, label='Resources')
+        plt.plot(self.a_grid, portfolio, label='Portfolio Cost')
+        plt.plot(self.a_grid, self.policy_c[1, :, D_idx, z_idx], label='Consumption')
+        plt.title('Budget Constraint Check (Employed)')
+        plt.xlabel('Assets')
+        plt.ylabel('Value')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.savefig(f'diagnostics/post_cm_iter_{iter_count}.png')
+        plt.close()
+
 
 # Example usage
 if __name__ == "__main__":
