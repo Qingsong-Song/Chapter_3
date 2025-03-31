@@ -28,13 +28,14 @@ class LagosWrightAiyagariSolver:
         self.n_D = params['n_D']       # Number of deposit/loan grid points
         self.n_e = 2                   # Employment states: [0=unemployed, 1=employed]
         self.n_z = 3                   # Skill types: [0=low, 1=medium, 2=high]
+        self.ny = 300                  # Number of grid points for DM goods
+        self.nd = 50                   # Number of grid points for deposit/loan
         
         # Price parameters
         self.prices = np.array([
             params['py'],              # Price of DM goods
             params['Rl'],             # Return on illiquid assets
-            params['phi_m'],          # Price of money
-            params['i']               # Nominal interest rate
+            params['Rd']              # Return of banks borrowing
         ])
         
         # Convergence parameters
@@ -298,39 +299,30 @@ class LagosWrightAiyagariSolver:
     def solve_dm_problem(self):
         """Solve DM problem for all states and update value function"""
         # Extract prices once outside loops
-        py, _, phi_m, _ = self.prices
+        py, Rl, Rd = self.prices
         
         # Create meshgrid for vectorized operations
-        e_grid, a_grid, m_grid, z_grid = np.meshgrid(
-            np.arange(self.n_e),
-            self.a_grid,
-            self.m_grid,
-            np.arange(self.n_z),
-            indexing='ij'
-        )
+        a_grid, m_grid = self.a_grid, self.m_grid
         
-        # Compute maximum spending limits for no-borrowing cases
-        y0_max_no_borrow = m_grid * phi_m / py  # Only money
-        y1_max_no_borrow = (m_grid * phi_m + a_grid) / py  # Money and assets
         
         # For each state combination
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
-                for a_idx in range(self.n_a):
-                    for m_idx in range(self.n_m):
+                for a_idx in range(self.n_a):  # iliquid assets
+                    for m_idx in range(self.n_m):  # money holdings
                         a = self.a_grid[a_idx]
                         m = self.m_grid[m_idx]
                         
                         # Case ω=0: Only money accepted
-                        y0_values = np.linspace(0, y0_max_no_borrow[e_idx, a_idx, m_idx, z_idx], 50)
-                        util0 = self._compute_omega0_utilities(e_idx, a, m, z_idx, y0_values, py, phi_m)
+                        y0_values = np.linspace(0, m/py, self.ny)
+                        util0 = self._compute_omega0_utilities(e_idx, a, m, z_idx, y0_values, py)
                         
                         # Case ω=1: Both money and assets
-                        y1_values = np.linspace(0, y1_max_no_borrow[e_idx, a_idx, m_idx, z_idx], 50)
-                        util1 = self._compute_omega1_utilities(e_idx, a, m, z_idx, y1_values, py, phi_m)
+                        y1_values = np.linspace(0, (m + a)/py, self.ny)
+                        util1 = self._compute_omega1_utilities(e_idx, a, m, z_idx, y1_values, py)
                         
                         # Depositor case
-                        d_values = np.linspace(0, m, 50)
+                        d_values = np.linspace(0, m, self.nd)
                         util_d = self._compute_deposit_utilities(e_idx, a, m, z_idx, d_values)
                         
                         # Store optimal policies
@@ -341,12 +333,12 @@ class LagosWrightAiyagariSolver:
         # Update DM value function after computing all policies
         self.update_DM_value_function()
     
-    def _compute_omega0_utilities(self, e_idx, a, m, z_idx, y_values, py, phi_m):
+    def _compute_omega0_utilities(self, e_idx, a, m, z_idx, y_values, py):
         """Helper function to compute utilities for ω=0 case"""
         util = np.zeros_like(y_values)
         
         for i, y in enumerate(y_values):
-            remain_m = m - y * py / phi_m
+            remain_m = m - y * py
             dm_utility = self.utility_dm(y)
             cm_utility = self.interpolate_CM_value(e_idx, a, remain_m, 0, z_idx)
             util[i] = dm_utility + cm_utility
