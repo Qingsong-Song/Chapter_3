@@ -27,7 +27,14 @@ class LagosWrightAiyagariSolver:
         # Grid specifications
         self.n_a = params['n_a']       # Number of asset grid points
         self.n_m = params['n_m']       # Number of money grid points
-        self.n_D = params['n_D']       # Number of deposit/loan grid points
+        self.n_d = params['n_d']       # Number of deposit grid points
+        self.n_l = params['n_l']       # Number of loan grid points
+        self.a_min = params['a_min']   # Minimum asset value
+        self.a_max = params['a_max']   # Maximum asset value
+        self.m_min = params['m_min']   # Minimum money holdings
+        self.m_max = params['m_max']   # Maximum money holdings
+        self.l_min = params['l_min']   # Minimum deposit/loan value
+        self.l_max = params['l_max']   # Maximum deposit/loan value
         self.n_e = 2                   # Employment states: [0=unemployed, 1=employed]
         self.n_z = 3                   # Skill types: [0=low, 1=medium, 2=high]
         self.ny = 300                  # Number of grid points for DM goods
@@ -37,7 +44,7 @@ class LagosWrightAiyagariSolver:
         self.prices = np.array([
             params['py'],              # Price of DM goods
             params['Rl'],             # Return on illiquid assets
-            params['Rd']              # Return of banks borrowing
+            params['Ri']              # Gross Return of banks borrowing
         ])
         
         # Convergence parameters
@@ -79,37 +86,15 @@ class LagosWrightAiyagariSolver:
     def initialize_functions(self):
         """Initialize value and policy functions"""
         # Initialize arrays
-        self.W = np.zeros((self.n_e, self.n_a, self.n_D, self.n_z))
-        self.V = np.zeros((self.n_e, self.n_a, self.n_m, self.n_z))
+        self.W = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
+        self.V = np.zeros((self.n_a, self.n_m, self.n_z, self.n_e))
         
         # Initialize W with reasonable guesses using broadcasting
         a_grid_reshaped = self.a_grid.reshape(-1, 1)  # Shape: (n_a, 1)
-        D_grid_reshaped = self.D_grid.reshape(1, -1)  # Shape: (1, n_D)
         
-        for e_idx in range(self.n_e):
-            for z_idx in range(self.n_z):
-                # Calculate income and consumption guess using broadcasting
-                inc = np.maximum(self.wages[:, e_idx, z_idx], 0.1)  # Ensure positive income
-                inc = inc.reshape(-1, 1)  # Shape: (n_a, 1)
-                
-                # Broadcasting: (n_a, n_D) with safety margin
-                c_guess = inc + 0.05 * (
-                    a_grid_reshaped + 
-                    np.maximum(0, D_grid_reshaped) * np.maximum(self.prices[3], 0.01)
-                )
-                c_guess = np.maximum(c_guess, 0.1)  # Ensure positive consumption
-                
-                self.W[e_idx, :, :, z_idx] = self.utility(c_guess) / (1 - self.beta)
         
-        # Initialize policy functions
-        self.policy_c = np.zeros_like(self.W)
-        self.policy_a_next = np.zeros_like(self.W)
-        self.policy_m_next = np.zeros_like(self.W)
+       
         
-        # Policy functions for DM
-        self.policy_y = np.zeros((self.n_e, self.n_a, self.n_m, self.n_z, 2))
-        self.policy_b = np.zeros_like(self.policy_y)
-        self.policy_d = np.zeros((self.n_e, self.n_a, self.n_m, self.n_z))
         
     def utility(self, c):
         """
@@ -252,7 +237,7 @@ class LagosWrightAiyagariSolver:
     
 
 
-    def solve_dm_consume(self, a, a_m, W_next, phi_m, p_y, nu, grid_y, grid_l, grid_d):
+    def solve_dm_consume(self, W_guess, prices):
         """
         Solve DM problem when household experiences preference shock (ε = 1)
         
@@ -262,7 +247,7 @@ class LagosWrightAiyagariSolver:
             Money holdings
         a_l = a - a_m
             Illiquid asset holdings
-        W_next : callable
+        W : callable
             The CM value function W_e(a, d, l; z)
         phi_m : float
             Real price of money
@@ -278,10 +263,47 @@ class LagosWrightAiyagariSolver:
         y_opt, l_opt, d_opt : float
             Optimal early consumption, borrowing, and deposits
         """
+        # Unpack prices
+        py = prices[0]
+
+        # Unpack grids
+        a_grid = self.a_grid
+        m_grid = self.m_grid
+        d_grid = self.d_grid
+        l_grid = self.l_grid
+        n_a = self.n_a
+        n_m = self.n_m
+        v_grid = self.V
         
-        # define grid_y
-        y0_grid = np.linspace(0, a - a_m, self.ny) # when ω=0
-        y1_grid = np.linspace(0, a, self.ny)  # when ω=1
+        # Setup grids for each return
+        policy_y0 = np.full(v_grid.shape, 0.0)  # Early consumption grid when omega = 0
+        policy_y1 = np.full(v_grid.shape, 0.0)  # Early consumption grid when omega = 1
+        
+        for e_idx in range(self.n_e):
+            for z_idx in range(self.n_z):
+                for a_idx, a in enumerate(n_a):
+                    for m_idx, a_m in enumerate(n_m):
+                        a_l = max(min(a - a_m, self.a_max), self.a_min)
+
+                        # case 1: preference shock + omega = 0
+                        grid_y0 = np.linspace(0, a_m, self.ny)
+                        # case 1.1: no borrow (deposit or not)
+
+
+                        # case 1.2: borrow
+
+
+                        # compare the two cases, get the maximum of V & associated policy functions
+
+
+
+
+
+                        # case 2: preference shock + omega = 1
+                        grid_y1 = np.linspace(0, a, self.ny)
+                        
+
+
 
         
         
@@ -381,19 +403,24 @@ if __name__ == "__main__":
         # Grid specifications
         'n_a': 100,       # Number of asset grid points
         'n_m': 50,        # Number of money grid points
-        'n_D': 40,        # Number of deposit/loan grid points
+        'n_l': 40,        # Number of deposit grid points
+        'n_d': 40,        # Number of loan grid points
         'a_min': 0.0,     # Minimum asset value
         'a_max': 20.0,    # Maximum asset value
         'm_min': 0.0,     # Minimum money holdings
         'm_max': 10.0,    # Maximum money holdings
         'l_min': 0,    # Minimum deposit/loan value
-        'l_max': 15.0,     # Maximum deposit/loan value
+        'l_max': 10.0,     # Maximum deposit/loan value
+        'd_min': 0,    # Minimum deposit/loan value
+        'd_max': 10.0,     # Maximum deposit/loan value
+        'n_e': 2,         # Employment states: [0=unemployed, 1=employed]
+        'n_z': 3,         # Skill types: [0=low, 1=medium, 2=high]
+        'ny': 300,        # Number of grid points for DM goods
         
         # Price parameters
         'py': 1.0,        # Price of DM goods
         'Rl': 1.03,       # Return on illiquid assets
-        'phi_m': 1.0,     # Price of money
-        'i': 0.02,        # Nominal interest rate
+        'Ri': 0.02,        # Nominal interest rate (gross)
 
         # Government Spending
         'Ag0': 0.1,      # Exogenous government spending 
