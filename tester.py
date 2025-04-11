@@ -44,7 +44,7 @@ class LagosWrightAiyagariSolver:
         self.prices = np.array([
             params['py'],              # Price of DM goods
             params['Rl'],             # Return on illiquid assets
-            params['Ri']              # Gross Return of banks borrowing
+            params['i']              # Gross Return of banks borrowing
         ])
         
         # Convergence parameters
@@ -71,7 +71,7 @@ class LagosWrightAiyagariSolver:
         self.d_grid = np.linspace(params['m_min'], params['m_max'], self.n_m)
 
         # loan grid
-        self.l_grid = 
+        self.l_grid = np.linspace(params['l_min'], params['l_max'], self.n_l)
         
         # Employment grid
         self.e_grid = np.array([0, 1])  # 0 = unemployed, 1 = employed
@@ -93,7 +93,6 @@ class LagosWrightAiyagariSolver:
         a_grid_reshaped = self.a_grid.reshape(-1, 1)  # Shape: (n_a, 1)
         
         
-       
         
         
     def utility(self, c):
@@ -236,7 +235,6 @@ class LagosWrightAiyagariSolver:
         return θ, λ, filling
     
 
-
     def solve_dm_consume(self, W_guess, prices):
         """
         Solve DM problem when household experiences preference shock (ε = 1)
@@ -265,6 +263,7 @@ class LagosWrightAiyagariSolver:
         """
         # Unpack prices
         py = prices[0]
+        i = prices[2]
 
         # Unpack grids
         a_grid = self.a_grid
@@ -278,6 +277,8 @@ class LagosWrightAiyagariSolver:
         # Setup grids for each return
         policy_y0 = np.full(v_grid.shape, 0.0)  # Early consumption grid when omega = 0
         policy_y1 = np.full(v_grid.shape, 0.0)  # Early consumption grid when omega = 1
+
+        
         
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
@@ -288,6 +289,8 @@ class LagosWrightAiyagariSolver:
                         # case 1: preference shock + omega = 0
                         grid_y0 = np.linspace(0, a_m, self.ny)
                         # case 1.1: no borrow (deposit or not)
+                        l_idx = 0
+                        v_grid0 = self.utility_dm(grid_y0) + 
 
 
                         # case 1.2: borrow
@@ -305,8 +308,84 @@ class LagosWrightAiyagariSolver:
 
 
 
+    @staticmethod    
+    def find_closest_indices(value, grid):
+        """
+        Find the two closest indices in the grid to the given value.
         
+        Parameters:
+        -----------
+        value : float
+            The value to find closest indices for
+        grid : numpy.ndarray
+            The grid of values
         
+        Returns:
+        --------
+        tuple
+            (lower_index, upper_index, lower_weight, upper_weight)
+        """
+        # Check if value is outside the grid
+        if value <= grid[0]:
+            return 0, 0, 1.0, 0.0
+        elif value >= grid[-1]:
+            return len(grid)-1, len(grid)-1, 1.0, 0.0
+        
+        # Find the index of the grid point just below the value
+        lower_idx = np.searchsorted(grid, value, side='right') - 1
+        upper_idx = lower_idx + 1
+        
+        # Calculate weights for interpolation
+        grid_range = grid[upper_idx] - grid[lower_idx]
+        if grid_range == 0:  # Avoid division by zero
+            lower_weight = 1.0
+            upper_weight = 0.0
+        else:
+            lower_weight = (grid[upper_idx] - value) / grid_range
+            upper_weight = (value - grid[lower_idx]) / grid_range
+        
+        return lower_idx, upper_idx, lower_weight, upper_weight
+
+
+    
+    def interpolate_2d(self, x_value, y_value, x_grid, y_grid, grid_values):
+        """
+        Perform bilinear interpolation for any two dimensions.
+        
+        Parameters:
+        -----------
+        x_value : float
+            Query value for the first dimension (e.g., asset, loan, etc.)
+        y_value : float
+            Query value for the second dimension (e.g., deposit, loan, etc.)
+        x_grid : numpy.ndarray
+            Grid of values for the first dimension
+        y_grid : numpy.ndarray
+            Grid of values for the second dimension
+        grid_values : numpy.ndarray
+            Grid values with shape matching x_grid and y_grid dimensions
+            This would be a 2D slice of W with fixed values for other dimensions
+        
+        Returns:
+        --------
+        float
+            Interpolated value
+        """
+        # Find indices and weights for x dimension
+        x_lower, x_upper, x_lower_weight, x_upper_weight = self.find_closest_indices(x_value, x_grid)
+        
+        # Find indices and weights for y dimension
+        y_lower, y_upper, y_lower_weight, y_upper_weight = self.find_closest_indices(y_value, y_grid)
+        
+        # Perform bilinear interpolation
+        interpolated_value = (
+            grid_values[x_lower, y_lower] * x_lower_weight * y_lower_weight +
+            grid_values[x_upper, y_lower] * x_upper_weight * y_lower_weight +
+            grid_values[x_lower, y_upper] * x_lower_weight * y_upper_weight +
+            grid_values[x_upper, y_upper] * x_upper_weight * y_upper_weight
+        )
+        
+        return interpolated_value  
         
 
     
@@ -409,10 +488,10 @@ if __name__ == "__main__":
         'a_max': 20.0,    # Maximum asset value
         'm_min': 0.0,     # Minimum money holdings
         'm_max': 10.0,    # Maximum money holdings
-        'l_min': 0,    # Minimum deposit/loan value
-        'l_max': 10.0,     # Maximum deposit/loan value
-        'd_min': 0,    # Minimum deposit/loan value
-        'd_max': 10.0,     # Maximum deposit/loan value
+        'l_min': 0,         # Minimum loan value
+        'l_max': 10.0,     # Maximum loan value
+        'd_min': 0,         # Minimum deposit value
+        'd_max': 10.0,     # Maximum deposit value
         'n_e': 2,         # Employment states: [0=unemployed, 1=employed]
         'n_z': 3,         # Skill types: [0=low, 1=medium, 2=high]
         'ny': 300,        # Number of grid points for DM goods
@@ -420,7 +499,7 @@ if __name__ == "__main__":
         # Price parameters
         'py': 1.0,        # Price of DM goods
         'Rl': 1.03,       # Return on illiquid assets
-        'Ri': 0.02,        # Nominal interest rate (gross)
+        'i': 0.02,        # Nominal interest rate
 
         # Government Spending
         'Ag0': 0.1,      # Exogenous government spending 
