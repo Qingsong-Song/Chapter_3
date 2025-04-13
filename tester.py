@@ -39,6 +39,9 @@ class LagosWrightAiyagariSolver:
         self.n_z = 3                   # Skill types: [0=low, 1=medium, 2=high]
         self.ny = 300                  # Number of grid points for DM goods
         self.nd = 50                   # Number of grid points for deposit/loan
+
+        # for computation
+        self.c_min = params['c_min']   # Minimum consumption
         
         # Price parameters
         self.prices = np.array([
@@ -50,6 +53,7 @@ class LagosWrightAiyagariSolver:
         # Convergence parameters
         self.max_iter = params['max_iter']
         self.tol = params['tol']
+        
         
         # Initialize grids
         self.setup_grids(params)
@@ -81,6 +85,8 @@ class LagosWrightAiyagariSolver:
         
         # Skill type distribution (fixed - doesn't change over time)
         self.z_dist = np.array([0.62, 0.28, 0.1])  # Distribution of skill types
+
+        
 
     
     def initialize_functions(self):
@@ -235,76 +241,126 @@ class LagosWrightAiyagariSolver:
         return θ, λ, filling
     
 
-    def solve_dm_consume(self, W_guess, prices):
+    def solve_dm_problem(self, W_guess, prices):
         """
-        Solve DM problem when household experiences preference shock (ε = 1)
+        Solve DM problem for given prices and guess for value function.
+        :param W_guess: Initial guess for value function
+        :param prices: Current prices [py, Rl, i]
+        :return: Updated value function and policy functions
         
-        Parameters:
-        -----------
-        a_m : float
-            Money holdings
-        a_l = a - a_m
-            Illiquid asset holdings
-        W : callable
-            The CM value function W_e(a, d, l; z)
-        phi_m : float
-            Real price of money
-        p_y : float
-            Price of early consumption
-        nu : callable
-            Utility function for early consumption
-        grid_y, grid_l, grid_d : ndarray
-            Grids for choice variables
-        
-        Returns:
-        --------
-        y_opt, l_opt, d_opt : float
-            Optimal early consumption, borrowing, and deposits
+    
         """
         # Unpack prices
         py = prices[0]
         i = prices[2]
 
-        # Unpack grids
-        a_grid = self.a_grid
-        m_grid = self.m_grid
-        d_grid = self.d_grid
-        l_grid = self.l_grid
-        n_a = self.n_a
-        n_m = self.n_m
-        v_grid = self.V
-        
-        # Setup grids for each return
-        policy_y0 = np.full(v_grid.shape, 0.0)  # Early consumption grid when omega = 0
-        policy_y1 = np.full(v_grid.shape, 0.0)  # Early consumption grid when omega = 1
+        # Initialize policy arrays (same as your code)
+        policy_y0 = np.zeros_like(self.V)
+        policy_d0 = np.zeros_like(self.V)
+        policy_l0 = np.zeros_like(self.V)
+        V0 = np.zeros_like(self.V)
+        policy_y1 = np.zeros_like(self.V)
+        policy_d1 = np.zeros_like(self.V)
+        policy_l1 = np.zeros_like(self.V)
+        V1 = np.zeros_like(self.V)
 
+
+        # Firm production and revenue calculations
+        self.Ys = self.κ_prime_inv(self.prices[0])
+        
+        # Calculate firm revenue for each skill type
+        self.frev = np.zeros(self.n_z)
+        for z_idx in range(self.n_z):
+            self.frev[z_idx] = self.z_grid[z_idx] * (1.0 + self.prices[0] * self.Ys - self.κ_fun(np.array([self.Ys]))[0])
+        
+        # Calculate wages and unemployment benefits (base on labor share)
+        self.wages_bar = np.zeros((self.n_z, self.n_e))
+        self.wages_bar[:, 1] = self.mu * self.frev  # Employed wage (labor share * revenue)
+        self.wages_bar[:, 0] = self.replace_rate * self.wages_bar[:, 1]  # Unemployed benefits
+        
+        # Taxes and transfers
+        self.Ag0 = params['Ag0']  # Government bond supply
+        taulumpsum = ((1.0 / self.prices[1]) - 1.0) * self.Ag0  # Revenue from money creation
+        
+        # Apply lump-sum transfer to all households using broadcasting
+        self.wages = self.wages_bar + taulumpsum
+        
         
         
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
-                for a_idx, a in enumerate(n_a):
-                    for m_idx, a_m in enumerate(n_m):
+                income = self.wages[z_idx, e_idx]
+                for a_idx, a in enumerate(self.a_grid):
+                    for m_idx, a_m in enumerate(self.m_grid):
                         a_l = max(min(a - a_m, self.a_max), self.a_min)
 
-                        # case 1: preference shock + omega = 0
-                        grid_y0 = np.linspace(0, a_m, self.ny)
-                        # case 1.1: no borrow (deposit or not)
-                        l_idx = 0
-                        v_grid0 = self.utility_dm(grid_y0) + 
-
-
-                        # case 1.2: borrow
-
-
-                        # compare the two cases, get the maximum of V & associated policy functions
-
-
-
-
-
-                        # case 2: preference shock + omega = 1
-                        grid_y1 = np.linspace(0, a, self.ny)
+                        # ω=0 Case (only money accepted)
+                        # No borrowing
+                        y0_nb = np.linspace(0, a_m/py, self.ny)
+                        d0 = a_m - py*y0_nb
+                        w0_nb = self.interpolate_2d_vectorized(
+                            a - d0 - py*y0_nb, d0, 
+                            self.a_grid, self.d_grid, 
+                            W_guess[:, :, 0, z_idx, e_idx]
+                        )
+                        v0_nb = self.utility_dm(y0_nb) + w0_nb
                         
+                        # With borrowing
+                        max_borrow = (a_l + income - self.c_min)/(1 + i)
+                        y0_b = np.linspace(0, (a_m + max_borrow)/py, self.ny)
+                        l0 = np.maximum(py*y0_b - a_m, 0)
+                        w0_b = self.interpolate_2d_vectorized(
+                            a + l0 - py*y0_b, l0,
+                            self.a_grid, self.l_grid,
+                            W_guess[:, 0, :, z_idx, e_idx]
+                        )
+                        v0_b = self.utility_dm(y0_b) + w0_b
+                        
+                        # Optimal choice for ω=0
+                        if v0_nb.max() > v0_b.max():
+                            opt_idx = np.argmax(v0_nb)
+                            policy_y0[a_idx,m_idx,z_idx,e_idx] = y0_nb[opt_idx]
+                            policy_d0[a_idx,m_idx,z_idx,e_idx] = d0[opt_idx]
+                            V0[a_idx,m_idx,z_idx,e_idx] = v0_nb[opt_idx]
+                        else:
+                            opt_idx = np.argmax(v0_b)
+                            policy_y0[a_idx,m_idx,z_idx,e_idx] = y0_b[opt_idx]
+                            policy_l0[a_idx,m_idx,z_idx,e_idx] = l0[opt_idx]
+                            V0[a_idx,m_idx,z_idx,e_idx] = v0_b[opt_idx]
+
+                        # ω=1 Case (both assets accepted)
+                        # No borrowing
+                        y1_nb = np.linspace(0, a/py, self.ny)
+                        d1 = a - py*y1_nb
+                        w1_nb = self.interpolate_2d_vectorized(
+                            a - d1 - py*y1_nb, d1,
+                            self.a_grid, self.d_grid,
+                            W_guess[:, :, 0, z_idx, e_idx]
+                        )
+                        v1_nb = self.utility_dm(y1_nb) + w1_nb
+                        
+                        # With borrowing
+                        max_borrow = (income - self.c_min)/(1 + i)
+                        y1_b = np.linspace(0, (a + max_borrow)/py, self.ny)
+                        l1 = np.maximum(py*y1_b - a, 0)
+                        w1_b = self.interpolate_2d_vectorized(
+                            a + l1 - py*y1_b, l1,
+                            self.a_grid, self.l_grid,
+                            W_guess[:, 0, :, z_idx, e_idx]
+                        )
+                        v1_b = self.utility_dm(y1_b) + w1_b
+                        
+                        # Optimal choice for ω=1
+                        if v1_nb.max() > v1_b.max():
+                            opt_idx = np.argmax(v1_nb)
+                            policy_y1[a_idx,m_idx,z_idx,e_idx] = y1_nb[opt_idx]
+                            policy_d1[a_idx,m_idx,z_idx,e_idx] = d1[opt_idx]
+                            V1[a_idx,m_idx,z_idx,e_idx] = v1_nb[opt_idx]
+                        else:
+                            opt_idx = np.argmax(v1_b)
+                            policy_y1[a_idx,m_idx,z_idx,e_idx] = y1_b[opt_idx]
+                            policy_l1[a_idx,m_idx,z_idx,e_idx] = l1[opt_idx]
+                            V1[a_idx,m_idx,z_idx,e_idx] = v1_b[opt_idx]
 
 
 
@@ -348,44 +404,55 @@ class LagosWrightAiyagariSolver:
 
 
     
-    def interpolate_2d(self, x_value, y_value, x_grid, y_grid, grid_values):
+    def interpolate_2d_vectorized(self, x_values, y_values, x_grid, y_grid, grid_values):
         """
-        Perform bilinear interpolation for any two dimensions.
+        Vectorized bilinear interpolation for arrays of query points
         
         Parameters:
         -----------
-        x_value : float
-            Query value for the first dimension (e.g., asset, loan, etc.)
-        y_value : float
-            Query value for the second dimension (e.g., deposit, loan, etc.)
-        x_grid : numpy.ndarray
-            Grid of values for the first dimension
-        y_grid : numpy.ndarray
-            Grid of values for the second dimension
+        x_values, y_values : numpy.ndarray
+            Arrays of query points (same shape)
+        x_grid, y_grid : numpy.ndarray
+            1D arrays of grid points
         grid_values : numpy.ndarray
-            Grid values with shape matching x_grid and y_grid dimensions
-            This would be a 2D slice of W with fixed values for other dimensions
-        
-        Returns:
-        --------
-        float
-            Interpolated value
+            2D array of values at grid points
         """
-        # Find indices and weights for x dimension
-        x_lower, x_upper, x_lower_weight, x_upper_weight = self.find_closest_indices(x_value, x_grid)
+        x_values = np.asarray(x_values)
+        y_values = np.asarray(y_values)
         
-        # Find indices and weights for y dimension
-        y_lower, y_upper, y_lower_weight, y_upper_weight = self.find_closest_indices(y_value, y_grid)
+        # Find indices using broadcasting
+        x_idx = np.searchsorted(x_grid, x_values) - 1
+        y_idx = np.searchsorted(y_grid, y_values) - 1
         
-        # Perform bilinear interpolation
-        interpolated_value = (
-            grid_values[x_lower, y_lower] * x_lower_weight * y_lower_weight +
-            grid_values[x_upper, y_lower] * x_upper_weight * y_lower_weight +
-            grid_values[x_lower, y_upper] * x_lower_weight * y_upper_weight +
-            grid_values[x_upper, y_upper] * x_upper_weight * y_upper_weight
-        )
+        # Clip indices to valid range
+        x_idx = np.clip(x_idx, 0, len(x_grid) - 2)
+        y_idx = np.clip(y_idx, 0, len(y_grid) - 2)
         
-        return interpolated_value  
+        # Get surrounding points
+        x0 = x_grid[x_idx]
+        x1 = x_grid[x_idx + 1]
+        y0 = y_grid[y_idx]
+        y1 = y_grid[y_idx + 1]
+        
+        # Calculate weights using broadcasting
+        wx = (x1 - x_values) / (x1 - x0)
+        wy = (y1 - y_values) / (y1 - y0)
+        
+        # Handle edge cases
+        wx = np.where((x1 - x0) == 0, 1.0, wx)
+        wy = np.where((y1 - y0) == 0, 1.0, wy)
+        
+        # Get values at corners using advanced indexing
+        v00 = grid_values[x_idx, y_idx]
+        v10 = grid_values[x_idx + 1, y_idx]
+        v01 = grid_values[x_idx, y_idx + 1]
+        v11 = grid_values[x_idx + 1, y_idx + 1]
+        
+        # Bilinear interpolation using broadcasting
+        return (v00 * wx * wy + 
+                v10 * (1 - wx) * wy + 
+                v01 * wx * (1 - wy) + 
+                v11 * (1 - wx) * (1 - wy))
         
 
     
@@ -406,31 +473,7 @@ class LagosWrightAiyagariSolver:
         """
         Solve for the equilibrium market tightness that clears the labor market.
         """
-        # Firm production and revenue calculations
-        self.Ys = self.κ_prime_inv(self.prices[0])
         
-        # Calculate firm revenue for each skill type
-        self.frev = np.zeros(self.n_z)
-        for z_idx in range(self.n_z):
-            self.frev[z_idx] = self.z_grid[z_idx] * (1.0 + self.prices[0] * self.Ys - self.κ_fun(np.array([self.Ys]))[0])
-        
-        # Calculate wages and unemployment benefits (base on labor share)
-        self.wages_bar = np.zeros((2, self.n_z))
-        self.wages_bar[1, :] = self.mu * self.frev  # Employed wage (labor share * revenue)
-        self.wages_bar[0, :] = self.replace_rate * self.wages_bar[1, :]  # Unemployed benefits
-        
-        # Taxes and transfers
-        self.Ag0 = params['Ag0']  # Government bond supply
-        taulumpsum = ((1.0 / self.prices[1]) - 1.0) * self.Ag0  # Revenue from money creation
-        
-        # Apply lump-sum transfer to all households using broadcasting
-        self.tau = np.full((self.n_a, 2, self.n_z), taulumpsum)
-        
-        # Full income (wages + transfers) for all states
-        self.wages = np.zeros((self.n_a, 2, self.n_z))
-        for z_idx in range(self.n_z):
-            for e_idx in range(2):
-                self.wages[:, e_idx, z_idx] = self.wages_bar[e_idx, z_idx] + self.tau[:, e_idx, z_idx]
         
         # Firm profits and value
         profits = self.frev - self.wages_bar[1, :]
@@ -478,6 +521,9 @@ if __name__ == "__main__":
         'delta': 0.035,   # Job separation rate
         'kappa': 7.29,    # Vacancy posting cost
         'repl_rate': 0.4, # Unemployment benefit replacement rate
+
+        # DM parameters
+        'c_min': 1e-2,       # minimum consumption
         
         # Grid specifications
         'n_a': 100,       # Number of asset grid points
