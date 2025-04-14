@@ -1,118 +1,214 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from visualisation_tools import plot_function, compare_parameterizations, compare_functions
-from scipy import interpolate
-from numba import njit, prange
+import os
+import time
 
 class LagosWrightAiyagariSolver:
-    """
-    Solver for the Lagos-Wright-Aiyagari hybrid model using robust value function iteration.
-    This implementation prioritizes robustness over speed to test for solution uniqueness.
-    """
-    
     def __init__(self, params):
-        # Model parameters
-        self.beta = params.get('beta', 0.96)  # Discount factor
-
-        # DM meeting probability and payment type probabilities
-        self.alpha = params.get('alpha', 0.075)  # Overall probability of needing to consume in DM
-        self.alpha_1 = params.get('alpha_1', 0.06)  # Probability of case where both cash and assets accepted
-        self.alpha_0 = 1 - self.alpha_1  # Probability of case where only cash accepted
-
-        self.gamma = params.get('gamma', 1.5)  # Curvature of utility function
-        self.Psi = params.get('Psi', 2.2)  # Level of early utility
-        self.psi = params.get('psi', 0.28) # Curvature of early utility
-        self.zeta = params.get('zeta', 0.75)  # Curvature of production function
-        self.nu = params.get('nu', 1.6)  # Matching function curvature
-        self.mu = params.get('mu', 0.7)  # Share of revenue going to workers
-        self.delta = params.get('delta', 0.035)  # Job destruction rate
-        self.kappa = params.get('kappa', 7.29)  # Job posting cost
-
-        self.replace_rate = params.get('repl_rate', 0.4)  # Fraction of unemployment compensation / working wage income
-
-        # Price vector: [py, Rl, phi_m, i]
-        self.prices = np.array([
-            params.get('py', 1.0),      # Price of early consumption goods
-            params.get('Rl', 1.03),     # Return on illiquid assets
-            params.get('phi_m', 1.0),   # Price of money
-            params.get('i', 0.02)       # Nominal interest rate
-        ])
-
+        """Initialize solver with model parameters"""
+        # Preference parameters
+        self.beta = params['beta']      # Discount factor
+        self.alpha = params['alpha']    # Probability of DM consumption opportunity
+        self.alpha_1 = params['alpha_1']  # Probability of accepting both money and assets
+        self.alpha_0 = 1.0 - self.alpha_1  # Probability of accepting only money
+        self.gamma = params['gamma']    # Risk aversion parameter
+        self.Psi = params['Psi']       # DM utility scaling parameter
+        
+        # Production and labor market parameters
+        self.psi = params['psi']       # Matching function elasticity
+        self.zeta = params['zeta']     # Worker bargaining power
+        self.nu = params['nu']         # Labor supply elasticity
+        self.mu = params['mu']         # Matching efficiency
+        self.delta = params['delta']   # Job separation rate
+        self.kappa = params['kappa']   # Vacancy posting cost
+        self.replace_rate = params['repl_rate']  # Unemployment benefit replacement rate
         
         # Grid specifications
-        self.n_a = params.get('n_a', 100)  # Grid size for assets
-        self.n_m = params.get('n_m', 50)   # Grid size for money
-        self.n_z = params.get('n_z', 3)    # Number of productivity states
+        self.n_a = params['n_a']       # Number of asset grid points
+        self.n_m = params['n_m']       # Number of money grid points
+        self.n_d = params['n_d']       # Number of deposit grid points
+        self.n_l = params['n_l']       # Number of loan grid points
+        self.a_min = params['a_min']   # Minimum asset value
+        self.a_max = params['a_max']   # Maximum asset value
+        self.m_min = params['m_min']   # Minimum money holdings
+        self.m_max = params['m_max']   # Maximum money holdings
+        self.l_min = params['l_min']   # Minimum deposit/loan value
+        self.l_max = params['l_max']   # Maximum deposit/loan value
+        self.n_e = 2                   # Employment states: [0=unemployed, 1=employed]
+        self.n_z = 3                   # Skill types: [0=low, 1=medium, 2=high]
+        self.ny = 300                  # Number of grid points for DM goods
+        self.nd = 50                   # Number of grid points for deposit/loan
+
+        # for computation
+        self.c_min = params['c_min']   # Minimum consumption
+        self.Rm = params['Rm']       # Gross return of real money balances (exogenous)
         
         # Price parameters
-        self.phi_m = params.get('phi_m', 1.0)  # Price of money
-        self.interest_rate = params.get('interest_rate', 0.03)  # Interest rate
+        self.prices = np.array([
+            params['py'],              # Price of DM goods
+            params['Rl'],             # Return on illiquid assets
+            params['i']              # Nominal rate from banks
+        ])
         
         # Convergence parameters
-        self.max_iter = params.get('max_iter', 1000)
-        self.tol = params.get('tol', 1e-6)
+        self.max_iter = params['max_iter']
+        self.tol = params['tol']
+        
         
         # Initialize grids
         self.setup_grids(params)
+
         
+        # Initialize labor market
+        self.initialise_labor_market()
+
         # Initialize value and policy functions
         self.initialize_functions()
+
     
     def setup_grids(self, params):
         """Set up state space grids with appropriate spacing"""
-        # Asset grid (potentially non-uniform)
-        a_min = params.get('a_min', 0.0)
-        a_max = params.get('a_max', 20.0)
-        self.a_grid = np.linspace(a_min, a_max, self.n_a)
+        # Asset grid
+        self.a_grid = np.linspace(params['a_min'], params['a_max'], self.n_a)
         
         # Money holdings grid
-        m_min = params.get('m_min', 0.0)
-        m_max = params.get('m_max', 10.0)
-        self.m_grid = np.linspace(m_min, m_max, self.n_m)
+        self.m_grid = np.linspace(params['m_min'], params['m_max'], self.n_m)
         
-        # Productivity grid
-        self.z_grid = np.array([0.58, 0.98, 2.15])  # Productivity levels
-        self.gz = np.array([0.62, 0.28, 0.1])  # Productivity transition probabilities
+        # Deposit grid (real terms)
+        self.d_grid = np.linspace(params['m_min'], params['m_max'], self.n_m)
+
+        # loan grid
+        self.l_grid = np.linspace(params['l_min'], params['l_max'], self.n_l)
         
+        # Employment grid
+        self.e_grid = np.array([0, 1])  # 0 = unemployed, 1 = employed
+        
+        # Productivity/skill grid
+        self.z_grid = np.array([0.58, 0.98, 2.15])  # Low, medium, high skill
+        
+        # Skill type distribution (fixed - doesn't change over time)
+        self.z_dist = np.array([0.62, 0.28, 0.1])  # Distribution of skill types
+
     
     def initialize_functions(self):
-        """Initialize value and policy functions"""
-        # Value function: dimensions (productivity, assets, money)
-        self.V = np.zeros((self.n_e, self.n_a, self.n_m))
+        """Initialize value and policy functions with reasonable guesses"""
+        # Initialize arrays
+        self.W = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
+        self.V = np.zeros((self.n_a, self.n_m, self.n_z, self.n_e))
         
-        # Initialize with a reasonable guess (e.g., based on steady-state consumption)
+        # Initialize W with reasonable guesses using a utility-based approach
+        # For each state, estimate a consumption level and calculate utility
+        for e_idx, e in enumerate(self.e_grid):
+            for z_idx, z in enumerate(self.z_grid):
+                # Estimate income based on skill and employment
+                income_est = self.wages[z_idx, e_idx]  # Rough estimate: unemployed get ~50% of employed income
+                
+                for a_idx, a in enumerate(self.a_grid):
+                    for d_idx, d in enumerate(self.d_grid):
+                        for l_idx, l in enumerate(self.l_grid):
+                            # Estimate resources available for consumption
+                            resources = a + (1 + self.prices[2]) * d - (1 + self.prices[2]) * l + income_est
+                            
+                            # Ensure minimum consumption
+                            consumption = max(resources * 0.9, self.c_min)  # Consume ~90% of resources
+                            
+                            # Calculate utility and scale for perpetuity
+                            self.W[a_idx, d_idx, l_idx, z_idx, e_idx] = self.utility(consumption)
+        
+        # Initialize V based on W
+        # For each state, estimate best deposit/loan choice and map to V
         for e_idx in range(self.n_e):
-            for a_idx in range(self.n_a):
-                for m_idx in range(self.n_m):
-                    # This is a placeholder - would need model-specific initialization
-                    self.V[e_idx, a_idx, m_idx] = self.utility(
-                        0.05 * (self.a_grid[a_idx] + self.phi_m * self.m_grid[m_idx]), 
-                        self.e_grid[e_idx]
-                    ) / (1 - self.beta)
+            for z_idx in range(self.n_z):
+                for a_idx, a in enumerate(self.a_grid):
+                    for m_idx, m in enumerate(self.m_grid):
+                        # Simple estimate: deposit all money, no loans
+                        d_est = m
+                        l_est = 0
+                        
+                        # Find closest grid points
+                        d_idx = min(self.find_nearest_index(self.d_grid, d_est), self.n_d - 1)
+                        l_idx = min(self.find_nearest_index(self.l_grid, l_est), self.n_l - 1)
+                        
+                        # Map to V
+                        self.V[a_idx, m_idx, z_idx, e_idx] = self.W[a_idx, d_idx, l_idx, z_idx, e_idx]
+
+
+    def initialise_labor_market(self):
+        """
+        Initialize labor market variables and calculate steady state values.
+        """
+
+        # Firm production and revenue calculations
+        self.Ys = self.κ_prime_inv(self.prices[0])  # Optimal production of early consumption goods
         
-        # Policy functions
-        self.policy_c = np.zeros((self.n_e, self.n_a, self.n_m))  # Consumption
-        self.policy_a_next = np.zeros((self.n_e, self.n_a, self.n_m))  # Next period assets
-        self.policy_m_next = np.zeros((self.n_e, self.n_a, self.n_m))  # Next period money
+        # Calculate firm revenue for each skill type
+        self.frev = np.zeros(self.n_z)
+        for z_idx in range(self.n_z):
+            self.frev[z_idx] = self.z_grid[z_idx] * (1.0 + self.prices[0] * self.Ys - self.κ_fun(np.array([self.Ys]))[0])
         
-        # Additional policies for decentralized market
-        self.policy_y = np.zeros((self.n_e, self.n_a, self.n_m, 2))  # DM consumption (for ω={0,1})
-        self.policy_b = np.zeros((self.n_e, self.n_a, self.n_m, 2))  # DM borrowing (for ω={0,1})
-        self.policy_d = np.zeros((self.n_e, self.n_a, self.n_m))     # Money held for precautionary purposes
-    
+        # Calculate wages and unemployment benefits (based on labor share)
+        self.wages_bar = np.zeros((self.n_z, self.n_e))
+        self.wages_bar[:, 1] = self.mu * self.frev  # Employed wage (labor share * revenue)
+        self.wages_bar[:, 0] = self.replace_rate * self.wages_bar[:, 1]  # Unemployed benefits
+        
+        # Taxes and transfers
+        self.Ag0 = params['Ag0']  # Government bond supply
+        taulumpsum = ((1.0 / self.prices[1]) - 1.0) * self.Ag0  # Revenue from money creation
+        
+        # Apply lump-sum transfer to all households using broadcasting
+        self.wages = self.wages_bar + taulumpsum
+
+        # Firm profits and value
+        profits = self.frev - self.wages_bar[:, 1]
+        self.Js = profits / (1.0 - ((1.0 - self.delta) / self.prices[1]))
+        
+        # Calculate steady state tightness and employment rate
+        # First check if the free-entry condition can be satisfied
+        entry_condition_max = np.max((self.z_grid * self.kappa * self.prices[1]) / self.Js)
+        
+        if entry_condition_max < 1:
+            # Use the first productivity type to determine tightness (should be the same for all z)
+            self.market_tightness = self.job_fill_inv((self.z_grid[0] * self.kappa * self.prices[1]) / self.Js[0])
+        else:
+            # If entry condition can't be satisfied, set very low tightness
+            self.market_tightness = 0.0001
+        
+        # Calculate job finding probability and employment rate
+        self.job_finding_prob = self.job_finding(self.market_tightness)
+        self.emp_rate = self.job_finding_prob / (self.delta + self.job_finding_prob)
+        
+        # Employment transition matrix: rows = current state, cols = next state
+        # [0,0] = P(unemployed → unemployed), [0,1] = P(unemployed → employed)
+        # [1,0] = P(employed → unemployed), [1,1] = P(employed → employed)
+        self.P = np.array([
+            [1 - self.job_finding_prob, self.job_finding_prob],
+            [self.delta, 1 - self.delta]
+        ])
+        
+        
     def utility(self, c):
         """
         1. Utility function for centralised market
         2. c : endogenously determined by the skill type e, which impacts the budget constraint
         """
-        return (c ** (1 - self.gamma) - 1) / (1 - self.gamma)
+        c = np.asarray(c)
+        # Add small epsilon to prevent division by zero
+        eps = 1e-10
+        safe_c = np.maximum(c, eps)
+        
+        return np.where(c <= 0,
+                    -1e5,  # penalty for non-positive consumption
+                    (safe_c ** (1 - self.gamma) - 1) / (1 - self.gamma))
     
     def utility_dm(self, y):
         """
         Utility function for decentralized market -- paramters are different from the centralised market
         Generates 26% increase in consumption during preference shocks.
         """
-        return self.Psi * (y ** (1 - self.psi) - 1) / (1 - self.psi)
+        y = np.asarray(y)
+        return np.where(y <= 0,
+                    0,  # normalisation in the paper
+                    self.Psi * (y ** (1 - self.psi) - 1) / (1 - self.psi))
     
     def κ_prime_inv(self, py):
         """
@@ -218,7 +314,7 @@ class LagosWrightAiyagariSolver:
         # Get productivity-normalized value of a filled job
         normalized_rev = self.firm_post_rev(prices=prices)
         
-        # Compare expected cost with expected benefit (both normalized by z)
+        # Compare expected cost with expected benefit (both normalised by z)
         if kappa >= normalized_rev / Rl:
             θ = 1e-3  # Almost no vacancies if cost exceeds revenue
         else:
@@ -228,1088 +324,679 @@ class LagosWrightAiyagariSolver:
         λ = self.job_finding(θ)
         filling = self.job_filling(θ)
         return θ, λ, filling
+    
+    def solve_dm_problem_vectorized(self, W_guess, prices):
+        """
+        Vectorized version of the DM problem solver.
+        :param W_guess: Initial guess for value function
+        :param prices: Current prices [py, Rl, i]
+        :return: Updated value function and policy functions
+        """
+        # Unpack prices
+        py = prices[0]
+        Rl = prices[1]
+        i = prices[2]
+
+        # Initialize arrays - using float32 for memory efficiency if precision allows
+        shape = (self.n_a, self.n_m, self.n_z, self.n_e)
+        policy_y0 = np.zeros(shape, dtype=np.float32)
+        policy_d0 = np.zeros(shape, dtype=np.float32)
+        policy_l0 = np.zeros(shape, dtype=np.float32)
+        V0 = np.zeros(shape, dtype=np.float32)
+        policy_y1 = np.zeros(shape, dtype=np.float32)
+        policy_d1 = np.zeros(shape, dtype=np.float32)
+        policy_l1 = np.zeros(shape, dtype=np.float32)
+        V1 = np.zeros(shape, dtype=np.float32)
+        policy_d_noshock = np.zeros(shape, dtype=np.float32)
+        V_noshock = np.zeros(shape, dtype=np.float32)
+        
+        # Precompute y-grids for all asset levels
+        y0_nb_grids = {}  # No borrowing grids for ω=0
+        y1_nb_grids = {}  # No borrowing grids for ω=1
+        
+        for a_idx, a in enumerate(self.a_grid):
+            y1_nb_grids[a_idx] = np.linspace(0, a/py, self.ny)  # Can use all assets when ω=1
+            for m_idx, a_m in enumerate(self.m_grid):
+                y0_nb_grids[(a_idx, m_idx)] = np.linspace(0, a_m/py, self.ny)  # Only money when ω=0
+        
+        # Loop over employment states and skill types
+        for e_idx in range(self.n_e):
+            for z_idx in range(self.n_z):
+                income = self.wages[z_idx, e_idx]
+                
+                # Vectorize for different asset levels
+                for a_idx, a in enumerate(self.a_grid):
+                    # Case 3: No preference shock (can be fully vectorized for all money levels)
+                    # When there's no preference shock, optimal policy is to deposit all money
+                    a_m_values = self.m_grid  # All possible money values
+                    d_noshock_values = a_m_values  # Deposit all money
+                    
+                    # Vectorized interpolation for no-shock case
+                    w_noshock_values = np.zeros(self.n_m)
+                    for m_idx, a_m in enumerate(a_m_values):
+                        # Calculate continuation value
+                        w_noshock_values[m_idx] = self.interpolate_2d_vectorised(
+                            np.array([a - a_m]), np.array([a_m]),
+                            self.a_grid, self.d_grid,
+                            W_guess[:, :, 0, z_idx, e_idx]
+                        )[0]
+                    
+                    # Store no-shock policies and values for all money levels at once
+                    policy_d_noshock[a_idx, :, z_idx, e_idx] = d_noshock_values
+                    V_noshock[a_idx, :, z_idx, e_idx] = w_noshock_values
+                    
+                    # Process each money level separately for shock cases
+                    for m_idx, a_m in enumerate(self.m_grid):
+                        a_l = max(min(a - a_m, self.a_max), self.a_min)
+                        
+                        # -------------------------------------------------------------------------
+                        # Case 1: Preference shock + ω=0 (only money accepted)
+                        # -------------------------------------------------------------------------
+                        
+                        # Case 1.1: No borrowing (can use precomputed grid)
+                        y0_nb = y0_nb_grids[(a_idx, m_idx)]
+                        d0 = a_m - py*y0_nb
+                        
+                        w0_nb = self.interpolate_2d_vectorised(
+                            a - d0 - py*y0_nb, d0, 
+                            self.a_grid, self.d_grid, 
+                            W_guess[:, :, 0, z_idx, e_idx]
+                        )
+                        v0_nb = self.utility_dm(y0_nb) + w0_nb
+                        
+                        # Case 1.2: With borrowing
+                        # Efficient borrowing constraint calculation
+                        income_based_max = (a_l + income - self.c_min)/(1 + i)
+                        collateral_based_max = a_l/(1 + i)
+                        effective_max_borrow = max(0, min(income_based_max, collateral_based_max))
+                        
+                        # Skip borrowing calculations if no borrowing is possible
+                        if effective_max_borrow > 0:
+                            y0_b = np.linspace(0, (a_m + effective_max_borrow)/py, self.ny)
+                            l0 = np.clip(py*y0_b - a_m, 0, effective_max_borrow)
+                            
+                            w0_b = self.interpolate_2d_vectorised(
+                                a + l0 - py*y0_b, l0,
+                                self.a_grid, self.l_grid,
+                                W_guess[:, 0, :, z_idx, e_idx]
+                            )
+                            v0_b = self.utility_dm(y0_b) + w0_b
+                            
+                            # Find optimal ω=0 policy efficiently
+                            max_nb_idx = np.argmax(v0_nb)
+                            max_b_idx = np.argmax(v0_b)
+                            max_nb_val = v0_nb[max_nb_idx]
+                            max_b_val = v0_b[max_b_idx]
+                            
+                            if max_nb_val >= max_b_val:
+                                policy_y0[a_idx, m_idx, z_idx, e_idx] = y0_nb[max_nb_idx]
+                                policy_d0[a_idx, m_idx, z_idx, e_idx] = d0[max_nb_idx]
+                                policy_l0[a_idx, m_idx, z_idx, e_idx] = 0.0
+                                V0[a_idx, m_idx, z_idx, e_idx] = max_nb_val
+                            else:
+                                policy_y0[a_idx, m_idx, z_idx, e_idx] = y0_b[max_b_idx]
+                                policy_d0[a_idx, m_idx, z_idx, e_idx] = 0.0
+                                policy_l0[a_idx, m_idx, z_idx, e_idx] = l0[max_b_idx]
+                                V0[a_idx, m_idx, z_idx, e_idx] = max_b_val
+                        else:
+                            # No borrowing possible, only use no-borrowing case
+                            max_idx = np.argmax(v0_nb)
+                            policy_y0[a_idx, m_idx, z_idx, e_idx] = y0_nb[max_idx]
+                            policy_d0[a_idx, m_idx, z_idx, e_idx] = d0[max_idx]
+                            policy_l0[a_idx, m_idx, z_idx, e_idx] = 0.0
+                            V0[a_idx, m_idx, z_idx, e_idx] = v0_nb[max_idx]
+                        
+                        # -------------------------------------------------------------------------
+                        # Case 2: Preference shock + ω=1 (both assets accepted)
+                        # -------------------------------------------------------------------------
+                        
+                        # Total liquidity available when ω=1 is the entire asset portfolio
+                        total_assets = a
+                        
+                        # Case 2.1: No borrowing (use precomputed grid)
+                        y1_nb = y1_nb_grids[a_idx]
+                        d1 = np.maximum(0, total_assets - py*y1_nb)
+                        
+                        w1_nb = self.interpolate_2d_vectorised(
+                            a - d1 - py*y1_nb, d1,
+                            self.a_grid, self.d_grid,
+                            W_guess[:, :, 0, z_idx, e_idx]
+                        )
+                        v1_nb = self.utility_dm(y1_nb) + w1_nb
+                        
+                        # Case 2.2: With borrowing
+                        max_borrow = max(0, (income - self.c_min)/(1 + i))
+                        
+                        # Skip borrowing calculations if no borrowing is possible
+                        if max_borrow > 0:
+                            y1_b = np.linspace(0, (total_assets + max_borrow)/py, self.ny)
+                            l1 = np.clip(py*y1_b - total_assets, 0, max_borrow)
+                            
+                            w1_b = self.interpolate_2d_vectorised(
+                                a + l1 - py*y1_b, l1,
+                                self.a_grid, self.l_grid,
+                                W_guess[:, 0, :, z_idx, e_idx]
+                            )
+                            v1_b = self.utility_dm(y1_b) + w1_b
+                            
+                            # Find optimal ω=1 policy efficiently
+                            max_nb_idx = np.argmax(v1_nb)
+                            max_b_idx = np.argmax(v1_b)
+                            max_nb_val = v1_nb[max_nb_idx]
+                            max_b_val = v1_b[max_b_idx]
+                            
+                            if max_nb_val >= max_b_val:
+                                policy_y1[a_idx, m_idx, z_idx, e_idx] = y1_nb[max_nb_idx]
+                                policy_d1[a_idx, m_idx, z_idx, e_idx] = d1[max_nb_idx]
+                                policy_l1[a_idx, m_idx, z_idx, e_idx] = 0.0
+                                V1[a_idx, m_idx, z_idx, e_idx] = max_nb_val
+                            else:
+                                policy_y1[a_idx, m_idx, z_idx, e_idx] = y1_b[max_b_idx]
+                                policy_d1[a_idx, m_idx, z_idx, e_idx] = 0.0
+                                policy_l1[a_idx, m_idx, z_idx, e_idx] = l1[max_b_idx]
+                                V1[a_idx, m_idx, z_idx, e_idx] = max_b_val
+                        else:
+                            # No borrowing possible, only use no-borrowing case
+                            max_idx = np.argmax(v1_nb)
+                            policy_y1[a_idx, m_idx, z_idx, e_idx] = y1_nb[max_idx]
+                            policy_d1[a_idx, m_idx, z_idx, e_idx] = d1[max_idx]
+                            policy_l1[a_idx, m_idx, z_idx, e_idx] = 0.0
+                            V1[a_idx, m_idx, z_idx, e_idx] = v1_nb[max_idx]
+
+        # Calculate expected value with correct probability weighting
+        V_dm = self.alpha * (self.alpha_0 * V0 + self.alpha_1 * V1) + (1 - self.alpha) * V_noshock
+
+        # Return updated value function and policy functions
+        return {
+            'V_dm': V_dm,
+            'V0': V0,
+            'V1': V1,
+            'V_noshock': V_noshock,
+            'policy_y0': policy_y0,
+            'policy_d0': policy_d0,
+            'policy_l0': policy_l0,
+            'policy_y1': policy_y1,
+            'policy_d1': policy_d1,
+            'policy_l1': policy_l1,
+            'policy_d_noshock': policy_d_noshock
+        }
+    
+    def solve_cm_problem_vectorized(self, V_guess, prices):
+        """
+        Vectorized solution for CM problem
+        :param V_guess: Initial guess for value function
+        :param prices: Current prices [py, Rl, i]
+        :return: Updated value function and policy functions
+        """
+        # Unpack prices
+        py = prices[0]
+        Rl = prices[1]
+        i = prices[2]
+
+        # Initialize value and policy functions
+        w_value = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
+        policy_ap = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
+        policy_m = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
+        
+        # Create meshgrids for potential portfolio choices
+        a_prime_grid, m_prime_grid = np.meshgrid(self.a_grid, self.m_grid, indexing='ij')
+        
+        # Calculate illiquid assets for each portfolio choice
+        a_l_grid = np.clip(a_prime_grid - m_prime_grid, self.a_min, self.a_max)
+        
+        # Precompute some portfolio costs
+        portfolio_cost = a_l_grid / Rl + m_prime_grid / self.Rm
+        
+        # Loop over employment status and skill types
+        for e_idx, e in enumerate(self.e_grid):
+            for z_idx in range(self.n_z):
+                income = self.wages[z_idx, e_idx]
+                
+                # Precompute continuation values for this (z, e) combination
+                # Create an array of shape (n_a, n_m) for continuation values
+                v_continuation = np.zeros((self.n_a, self.n_m))
+                for ap_idx in range(self.n_a):
+                    for m_idx in range(self.n_m):
+                        # Expected value over employment transitions
+                        v_continuation[ap_idx, m_idx] = V_guess[ap_idx, m_idx, z_idx, :] @ self.P[e_idx, :]
+                
+                # Vectorize over current state (a, d, l)
+                for a_idx, a in enumerate(self.a_grid):
+                    for d_idx, d in enumerate(self.d_grid):
+                        for l_idx, l in enumerate(self.l_grid):
+                            # Calculate total resources available
+                            total_resources = a + (1 + i) * d - (1 + i) * l + income
+                            
+                            # Calculate consumption for each portfolio choice
+                            c_grid = total_resources - portfolio_cost
+                            
+                            # Apply utility function to all consumption levels at once
+                            utility_grid = np.where(c_grid >= self.c_min, 
+                                                  self.utility(c_grid), 
+                                                  -1e5)  # Penalty for insufficient consumption
+                            
+                            # Total value (utility + continuation value)
+                            w_choice = utility_grid + self.beta * v_continuation
+                            
+                            # Find the maximum value and corresponding indices
+                            max_val = np.max(w_choice)
+                            max_indices = np.unravel_index(np.argmax(w_choice), w_choice.shape)
+                            
+                            # Store the maximum value and corresponding policies
+                            w_value[a_idx, d_idx, l_idx, z_idx, e_idx] = max_val
+                            policy_ap[a_idx, d_idx, l_idx, z_idx, e_idx] = self.a_grid[max_indices[0]]
+                            policy_m[a_idx, d_idx, l_idx, z_idx, e_idx] = self.m_grid[max_indices[1]]
+
+        # Return updated value function and policy functions
+        return {
+            'W': w_value,
+            'a_p': policy_ap,
+            'a_m': policy_m,
+        }
+    
+
+    @staticmethod    
+    def find_closest_indices(value, grid):
+        """
+        Find the two closest indices in the grid to the given value.
+        
+        Parameters:
+        -----------
+        value : float
+            The value to find closest indices for
+        grid : numpy.ndarray
+            The grid of values
+        
+        Returns:
+        --------
+        tuple
+            (lower_index, upper_index, lower_weight, upper_weight)
+        """
+        # Check if value is outside the grid
+        if value <= grid[0]:
+            return 0, 0, 1.0, 0.0
+        elif value >= grid[-1]:
+            return len(grid)-1, len(grid)-1, 1.0, 0.0
+        
+        # Find the index of the grid point just below the value
+        lower_idx = np.searchsorted(grid, value, side='right') - 1
+        upper_idx = lower_idx + 1
+        
+        # Calculate weights for interpolation
+        grid_range = grid[upper_idx] - grid[lower_idx]
+        if grid_range == 0:  # Avoid division by zero
+            lower_weight = 1.0
+            upper_weight = 0.0
+        else:
+            lower_weight = (grid[upper_idx] - value) / grid_range
+            upper_weight = (value - grid[lower_idx]) / grid_range
+        
+        return lower_idx, upper_idx, lower_weight, upper_weight
+
 
     
-    def solve_dm_problem(self, e_idx, a_idx, m_idx):
+    def interpolate_2d_vectorised(self, x_values, y_values, x_grid, y_grid, grid_values):
         """
-        Solve the decentralised market problem for a given state.
+        Vectorized bilinear interpolation for arrays of query points
         
-        Key considerations:
-        1. Households must consume if hit by preference shock (with probability alpha)
-        2. Asset acceptance depends on omega:
-        - With probability alpha_0, only cash is accepted (ω=0)
-        - With probability alpha_1, both cash and illiquid assets are accepted (ω=1)
-        3. Borrowing decision must compare utilities with and without borrowing
+        Parameters:
+        -----------
+        x_values, y_values : numpy.ndarray
+            Arrays of query points (same shape)
+        x_grid, y_grid : numpy.ndarray
+            1D arrays of grid points
+        grid_values : numpy.ndarray
+            2D array of values at grid points
         """
-        a = self.a_grid[a_idx]
-        m = self.m_grid[m_idx]
-        e = self.e_grid[e_idx]
+        x_values = np.asarray(x_values)
+        y_values = np.asarray(y_values)
         
-        # Extract prices from vector
-        py = self.prices[0]
-        Rl = self.prices[1]
-        phi_m = self.prices[2]
-        i = self.prices[3]
+        # Find indices using broadcasting
+        x_idx = np.searchsorted(x_grid, x_values) - 1
+        y_idx = np.searchsorted(y_grid, y_values) - 1
         
-        # Case ω=0: Only money is accepted
-        # Maximum affordable y with only money (no borrowing)
-        y0_max_no_borrow = m * phi_m / py
+        # Clip indices to valid range
+        x_idx = np.clip(x_idx, 0, len(x_grid) - 2)
+        y_idx = np.clip(y_idx, 0, len(y_grid) - 2)
         
-        # Without borrowing:
-        # Try different y0 values up to y0_max_no_borrow
-        y0_values_no_borrow = np.linspace(0, y0_max_no_borrow, 50)
-        util0_no_borrow = np.zeros_like(y0_values_no_borrow)
+        # Get surrounding points
+        x0 = x_grid[x_idx]
+        x1 = x_grid[x_idx + 1]
+        y0 = y_grid[y_idx]
+        y1 = y_grid[y_idx + 1]
         
-        for i, y0 in enumerate(y0_values_no_borrow):
-            # Calculate post-DM wealth
-            a_post = a + m * self.phi_m - py * y0
-            # For case ω=0 without borrowing
-            b0 = 0
-            # Calculate utility
-            util0_no_borrow[i] = self.utility_dm(y0) + self.interpolate_CM_value(a_post, -b0, e_idx)
+        # Calculate weights using broadcasting
+        wx = (x1 - x_values) / (x1 - x0)
+        wy = (y1 - y_values) / (y1 - y0)
         
-        # Find optimal y0 without borrowing
-        if len(util0_no_borrow) > 0:
-            best_idx = np.argmax(util0_no_borrow)
-            optimal_y0_no_borrow = y0_values_no_borrow[best_idx]
-            max_util0_no_borrow = util0_no_borrow[best_idx]
-        else:
-            optimal_y0_no_borrow = 0
-            max_util0_no_borrow = self.utility_dm(0) + self.interpolate_CM_value(a + m * self.phi_m, 0, e_idx)
+        # Handle edge cases
+        wx = np.where((x1 - x0) == 0, 1.0, wx)
+        wy = np.where((y1 - y0) == 0, 1.0, wy)
         
-        # With borrowing:
-        # We need to consider higher y values that require borrowing
-        y0_max_with_borrow = min(2*y0_max_no_borrow, 10)  # Arbitrary upper bound
-        y0_values_with_borrow = np.linspace(y0_max_no_borrow+0.01, y0_max_with_borrow, 50)
-        util0_with_borrow = np.zeros_like(y0_values_with_borrow)
-        b0_values = np.zeros_like(y0_values_with_borrow)
+        # Get values at corners using advanced indexing
+        v00 = grid_values[x_idx, y_idx]
+        v10 = grid_values[x_idx + 1, y_idx]
+        v01 = grid_values[x_idx, y_idx + 1]
+        v11 = grid_values[x_idx + 1, y_idx + 1]
         
-        for i, y0 in enumerate(y0_values_with_borrow):
-            # Calculate required borrowing
-            payment_needed = py * y0
-            available_funds = m * self.phi_m
-            b0 = (payment_needed - available_funds) / self.phi_m
-            
-            # Calculate post-DM wealth and utility
-            a_post = a  # Only money was spent, assets remain
-            util0_with_borrow[i] = self.utility_dm(y0) + self.interpolate_CM_value(a_post, -b0, e_idx)
-            b0_values[i] = b0
-        
-        # Find optimal y0 with borrowing
-        if len(util0_with_borrow) > 0:
-            best_idx = np.argmax(util0_with_borrow)
-            optimal_y0_with_borrow = y0_values_with_borrow[best_idx]
-            optimal_b0_with_borrow = b0_values[best_idx]
-            max_util0_with_borrow = util0_with_borrow[best_idx]
-        else:
-            optimal_y0_with_borrow = 0
-            optimal_b0_with_borrow = 0
-            max_util0_with_borrow = -np.inf
-        
-        # Compare utilities with and without borrowing
-        if max_util0_no_borrow >= max_util0_with_borrow:
-            optimal_y0 = optimal_y0_no_borrow
-            optimal_b0 = 0
-        else:
-            optimal_y0 = optimal_y0_with_borrow
-            optimal_b0 = optimal_b0_with_borrow
-        
-        # Case ω=1: Both money and assets are accepted
-        # Maximum affordable y with money and assets (no borrowing)
-        y1_max_no_borrow = (m * self.phi_m + a) / py
-        
-        # Without borrowing:
-        # Try different y1 values up to y1_max_no_borrow
-        y1_values_no_borrow = np.linspace(0, y1_max_no_borrow, 50)
-        util1_no_borrow = np.zeros_like(y1_values_no_borrow)
-        
-        for i, y1 in enumerate(y1_values_no_borrow):
-            # Calculate post-DM wealth with full payment from available funds
-            payment = py * y1
-            remaining_wealth = m * self.phi_m + a - payment
-            # For case ω=1 without borrowing
-            b1 = 0
-            # Calculate utility
-            util1_no_borrow[i] = self.utility_dm(y1) + self.interpolate_CM_value(remaining_wealth, -b1, e_idx)
-        
-        # Find optimal y1 without borrowing
-        if len(util1_no_borrow) > 0:
-            best_idx = np.argmax(util1_no_borrow)
-            optimal_y1_no_borrow = y1_values_no_borrow[best_idx]
-            max_util1_no_borrow = util1_no_borrow[best_idx]
-        else:
-            optimal_y1_no_borrow = 0
-            max_util1_no_borrow = self.utility_dm(0) + self.interpolate_CM_value(m * self.phi_m + a, 0, e_idx)
-        
-        # With borrowing:
-        # We need to consider higher y1 values that require borrowing
-        y1_max_with_borrow = min(2*y1_max_no_borrow, 10)  # Arbitrary upper bound
-        y1_values_with_borrow = np.linspace(y1_max_no_borrow+0.01, y1_max_with_borrow, 50)
-        util1_with_borrow = np.zeros_like(y1_values_with_borrow)
-        b1_values = np.zeros_like(y1_values_with_borrow)
-        
-        for i, y1 in enumerate(y1_values_with_borrow):
-            # Calculate required borrowing
-            payment_needed = py * y1
-            available_funds = m * self.phi_m + a
-            b1 = (payment_needed - available_funds) / self.phi_m
-            
-            # Calculate post-DM wealth and utility
-            post_wealth = 0  # All assets and money spent, only borrowed amount remains
-            util1_with_borrow[i] = self.utility_dm(y1) + self.interpolate_CM_value(post_wealth, -b1, e_idx)
-            b1_values[i] = b1
-        
-        # Find optimal y1 with borrowing
-        if len(util1_with_borrow) > 0:
-            best_idx = np.argmax(util1_with_borrow)
-            optimal_y1_with_borrow = y1_values_with_borrow[best_idx]
-            optimal_b1_with_borrow = b1_values[best_idx]
-            max_util1_with_borrow = util1_with_borrow[best_idx]
-        else:
-            optimal_y1_with_borrow = 0
-            optimal_b1_with_borrow = 0
-            max_util1_with_borrow = -np.inf
-        
-        # Compare utilities with and without borrowing
-        if max_util1_no_borrow >= max_util1_with_borrow:
-            optimal_y1 = optimal_y1_no_borrow
-            optimal_b1 = 0
-        else:
-            optimal_y1 = optimal_y1_with_borrow
-            optimal_b1 = optimal_b1_with_borrow
-        
-        # No preference shock case (depositor)
-        # Try different deposit amounts
-        d_max = m  # Can't deposit more money than you have
-        d_values = np.linspace(0, d_max, 50)
-        util_d = np.zeros_like(d_values)
-        
-        for i, d in enumerate(d_values):
-            # Calculate post-DM wealth
-            post_wealth = a + m * self.phi_m - d * self.phi_m
-            # Calculate utility (no early consumption utility)
-            util_d[i] = self.interpolate_CM_value(post_wealth, d, e_idx)
-        
-        # Find optimal d
-        if len(util_d) > 0:
-            best_idx = np.argmax(util_d)
-            optimal_d = d_values[best_idx]
-        else:
-            optimal_d = 0
-        
-        # Store optimal policies
-        self.policy_y[e_idx, a_idx, m_idx, 0] = optimal_y0
-        self.policy_y[e_idx, a_idx, m_idx, 1] = optimal_y1
-        self.policy_b[e_idx, a_idx, m_idx, 0] = optimal_b0
-        self.policy_b[e_idx, a_idx, m_idx, 1] = optimal_b1
-        self.policy_d[e_idx, a_idx, m_idx] = optimal_d
+        # Bilinear interpolation using broadcasting
+        return (v00 * wx * wy + 
+                v10 * (1 - wx) * wy + 
+                v01 * wx * (1 - wy) + 
+                v11 * (1 - wx) * (1 - wy))
     
-    def solve_bellman_iteration(self):
-        """Solve the model using value function iteration"""
-        converged = False
-        iter_count = 0
+    def find_nearest_index(self, grid, value):
+        """Find index of the nearest grid point to a given value"""
+        idx = np.abs(grid - value).argmin()
+        return idx
+    
+    def find_nearest_lower_index(self, grid, value):
+            """Find index of the nearest grid point less than or equal to a given value"""
+            indices = np.where(grid <= value)[0]
+            if len(indices) == 0:
+                return 0
+            return indices[-1]
+
+    def solver_iteration(self, prices, W_guess=None):
+        """
+        Performs one iteration of the solution algorithm:
+        1. Solve DM problem given W_guess to get V
+        2. Solve CM problem given V to get updated W
         
-        while not converged and iter_count < self.max_iter:
-            V_next = np.zeros_like(self.V)
+        :param prices: Current prices [py, Rl, i]
+        :param W_guess: Initial guess for value function, uses self.W if None
+        :return: Updated value functions, policy functions, and convergence information
+        """
+        # Use current W if no guess provided
+        if W_guess is None:
+            W_guess = self.W
             
-            # Loop over current states
-            for e_idx in range(self.n_e):
-                for a_idx in range(self.n_a):
-                    for m_idx in range(self.n_m):
-                        # Current state
-                        e = self.e_grid[e_idx]
-                        a = self.a_grid[a_idx]
-                        m = self.m_grid[m_idx]
-                        
-                        # Solve for optimal policies and update value function
-                        V_next[e_idx, a_idx, m_idx] = self.solve_single_state(e_idx, a_idx, m_idx)
+        # Step 1: Solve DM problem to get V
+        dm_results = self.solve_dm_problem_vectorized(W_guess, prices)
+        V = dm_results['V_dm']
+        
+        # Step 2: Solve CM problem to get updated W
+        cm_results = self.solve_cm_problem_vectorized(V, prices)
+        W_updated = cm_results['W']
+        
+        # Calculate convergence metrics
+        diff = np.abs(W_updated - W_guess)
+        max_diff = np.max(diff)
+        mean_diff = np.mean(diff)
+        
+        return {
+            'W': W_updated,
+            'V': V,
+            'dm_results': dm_results,
+            'cm_results': cm_results,
+            'max_diff': max_diff,
+            'mean_diff': mean_diff,
+            'converged': max_diff < self.tol
+        }
+
+    def solve_model(self, prices=None, plot_frequency=10):
+        """
+        Solve the model by iterating until convergence or max iterations reached.
+        Plots value and policy functions periodically during iteration.
+        
+        :param prices: Custom prices [py, Rl, i], uses self.prices if None
+        :param plot_frequency: How often to plot (every N iterations)
+        :return: Solution dictionary with value functions, policy functions, and convergence info
+        """
+        if prices is None:
+            prices = self.prices
             
-            # Check convergence
-            max_diff = np.max(np.abs(V_next - self.V))
-            converged = max_diff < self.tol
+        # Initialize
+        W_current = self.W.copy()
+        iteration = 0
+        converged = False
+        start_time = time.time()
+        
+        # Store convergence history
+        history = {
+            'max_diff': [],
+            'mean_diff': [],
+            'iteration_time': []
+        }
+        
+        # Main solution loop
+        while iteration < self.max_iter and not converged:
+            iter_start = time.time()
             
-            # Update value function
-            self.V = V_next.copy()
+            # Perform one iteration
+            results = self.solver_iteration(prices, W_current)
+            W_current = results['W']
             
-            iter_count += 1
-            if iter_count % 10 == 0:
-                print(f"Iteration {iter_count}, Max Diff: {max_diff:.8f}")
+            # Store convergence metrics
+            max_diff = results['max_diff']
+            mean_diff = results['mean_diff']
+            converged = results['converged']
+            
+            # Calculate iteration time
+            iter_time = time.time() - iter_start
+            history['max_diff'].append(max_diff)
+            history['mean_diff'].append(mean_diff)
+            history['iteration_time'].append(iter_time)
+            
+            # Display progress
+            iteration += 1
+            if iteration % 5 == 0 or converged:
+                print(f"Iteration {iteration}: Max diff = {max_diff:.6e}, Mean diff = {mean_diff:.6e}, Time = {iter_time:.2f}s")
+            
+            # Plot current value and policy functions
+            if iteration % plot_frequency == 0 or converged:
+                self.plot_functions(iteration, results)
+        
+        # Final results
+        total_time = time.time() - start_time
         
         if converged:
-            print(f"Converged after {iter_count} iterations")
+            print(f"\nConverged after {iteration} iterations. Total time: {total_time:.2f}s")
         else:
-            print("Failed to converge within maximum iterations")
+            print(f"\nDid not converge after {self.max_iter} iterations. Total time: {total_time:.2f}s")
         
-        # After convergence, compute final policy functions
-        self.compute_policy_functions()
+        # Store final value functions
+        self.W = W_current
+        self.V = results['V']
         
-        return converged
-    
-    def solve_single_state(self, e_idx, a_idx, m_idx):
+        # Return complete solution
+        return {
+            'W': W_current,
+            'V': results['V'],
+            'dm_results': results['dm_results'],
+            'cm_results': results['cm_results'],
+            'converged': converged,
+            'iterations': iteration,
+            'total_time': total_time,
+            'history': history
+        }
+
+    def plot_functions(self, iteration, results):
         """
-        Solve Bellman equation for a single state (e, a, m)
-        Returns the optimized value function at this state
+        Plot value functions and policy functions along the asset dimension,
+        separated by employment status and skill types.
+        
+        :param iteration: Current iteration number
+        :param results: Results from solver_iteration
         """
-        e = self.e_grid[e_idx]
-        a = self.a_grid[a_idx]
-        m = self.m_grid[m_idx]
+        # Create directory for plots if it doesn't exist
+        if not os.path.exists('plots'):
+            os.makedirs('plots')
         
-        # Total resources available
-        phi_m = self.phi_m
-        B = m  # Money holdings
-        income = a + phi_m * (1 + self.interest_rate) * B + self.income_transfer(e)
+        # Extract results
+        V = results['V']
+        W = results['W']
+        dm_results = results['dm_results']
+        cm_results = results['cm_results']
         
-        # Grid search over possible choices (asset and money combination)
-        best_value = -np.inf
-        best_c = 0
-        best_a_next_idx = 0
-        best_m_next_idx = 0
+        # Set up figure with subplots
+        fig, axes = plt.subplots(3, 2, figsize=(12, 14))
+        fig.suptitle(f'Iteration {iteration}', fontsize=16)
         
-        # Loop over all possible next period asset and money combinations
-        for a_next_idx in range(self.n_a):
-            for m_next_idx in range(self.n_m):
-                a_next = self.a_grid[a_next_idx]
-                m_next = self.m_grid[m_next_idx]
+        # Plot value functions across asset dimension for different skill and employment types
+        for z_idx in range(self.n_z):
+            for e_idx in range(self.n_e):
+                row = z_idx
+                col = e_idx
                 
-                # Cost of purchasing these assets
-                # Simplified cost calculation - replace with actual pricing
-                cost = a_next / (1 + self.interest_rate) + phi_m * m_next
-                
-                # Check if affordable
-                if cost <= income:
-                    # Current period consumption
-                    c = income - cost
+                # Check if we have enough subplot axes
+                if row < axes.shape[0] and col < axes.shape[1]:
+                    # Select a middle money/deposit/loan index
+                    m_idx = self.n_m // 2
+                    d_idx = self.n_d // 2
+                    l_idx = self.n_l // 2
                     
-                    if c > 0:  # Ensure positive consumption
-                        # Current utility
-                        current_utility = self.utility(c, e)
-                        
-                        # Expected future value
-                        expected_future = 0
-                        
-                        # Loop over future productivity states
-                        for e_next_idx in range(self.n_e):
-                            e_next = self.e_grid[e_next_idx]
-                            prob = self.e_transition[e_idx, e_next_idx]
-                            
-                            # With probability alpha, agent needs to consume in DM
-                            dm_value = 0
-                            
-                            # First case: Only cash accepted (omega = 0)
-                            omega = 0
-                            y0, b0 = self.solve_dm_problem(a_next, m_next, e_next_idx, omega)
-                            
-                            # Resources after DM with only cash accepted
-                            a_post_dm0 = a_next  # Assets unchanged
-                            m_post_dm0 = m_next + b0  # Money holdings may change
-                            
-                            # Convert post-DM state to indices
-                            a_post_idx0 = np.searchsorted(self.a_grid, a_post_dm0)
-                            if a_post_idx0 == self.n_a:
-                                a_post_idx0 = self.n_a - 1
-                            
-                            m_post_idx0 = np.searchsorted(self.m_grid, m_post_dm0)
-                            if m_post_idx0 == self.n_m:
-                                m_post_idx0 = self.n_m - 1
-                            
-                            # Future value including DM utility for omega = 0
-                            dm_utility0 = self.utility_dm(y0)
-                            dm_continuation0 = self.V[e_next_idx, a_post_idx0, m_post_idx0]
-                            
-                            # Second case: Both cash and assets accepted (omega = 1)
-                            omega = 1
-                            y1, b1 = self.solve_dm_problem(a_next, m_next, e_next_idx, omega)
-                            
-                            # Resources after DM with cash and assets accepted
-                            # Simplified assumption: assets used after money is depleted
-                            a_post_dm1 = max(0, a_next - max(0, y1 - m_next))
-                            m_post_dm1 = max(0, m_next - y1) + b1
-                            
-                            # Convert post-DM state to indices
-                            a_post_idx1 = np.searchsorted(self.a_grid, a_post_dm1)
-                            if a_post_idx1 == self.n_a:
-                                a_post_idx1 = self.n_a - 1
-                            
-                            m_post_idx1 = np.searchsorted(self.m_grid, m_post_dm1)
-                            if m_post_idx1 == self.n_m:
-                                m_post_idx1 = self.n_m - 1
-                            
-                            # Future value including DM utility for omega = 1
-                            dm_utility1 = self.utility_dm(y1)
-                            dm_continuation1 = self.V[e_next_idx, a_post_idx1, m_post_idx1]
-                            
-                            # Weighted average of DM outcomes based on alpha_0 and alpha_1
-                            dm_value = self.alpha * (
-                                self.alpha_0 * (dm_utility0 + dm_continuation0) + 
-                                self.alpha_1 * (dm_utility1 + dm_continuation1)
-                            )
-                            
-                            # Value without DM consumption need (probability 1-alpha)
-                            no_dm_prob = 1 - self.alpha
-                            no_dm_value = no_dm_prob * self.V[e_next_idx, a_next_idx, m_next_idx]
-                            
-                            # Total expected future value for this productivity transition
-                            expected_future += prob * (dm_value + no_dm_value)
-                        
-                        # Total value
-                        value = current_utility + self.beta * expected_future
-                        
-                        # Update best choice if this is better
-                        if value > best_value:
-                            best_value = value
-                            best_c = c
-                            best_a_next_idx = a_next_idx
-                            best_m_next_idx = m_next_idx
+                    # Plot value functions
+                    axes[row, col].plot(self.a_grid, V[:, m_idx, z_idx, e_idx], 
+                                        label=f'V (m={self.m_grid[m_idx]:.2f})')
+                    axes[row, col].plot(self.a_grid, W[:, d_idx, l_idx, z_idx, e_idx], 
+                                        label=f'W (d={self.d_grid[d_idx]:.2f}, l={self.l_grid[l_idx]:.2f})')
+                    
+                    # Label plot
+                    employment_label = 'Employed' if e_idx == 1 else 'Unemployed'
+                    skill_label = f'z={self.z_grid[z_idx]:.2f}'
+                    axes[row, col].set_title(f'{skill_label}, {employment_label}')
+                    axes[row, col].set_xlabel('Assets (a)')
+                    axes[row, col].set_ylabel('Value')
+                    axes[row, col].legend()
+                    axes[row, col].grid(True)
         
-        # Update policy functions for this state
-        self.policy_c[e_idx, a_idx, m_idx] = best_c
-        self.policy_a_next[e_idx, a_idx, m_idx] = self.a_grid[best_a_next_idx]
-        self.policy_m_next[e_idx, a_idx, m_idx] = self.m_grid[best_m_next_idx]
-        
-        # Return optimized value
-        return best_value
-    
-    
-    def compute_policy_functions(self):
-        """
-        Compute detailed policy functions after value function convergence
-        This includes DM policies that depend on future states
-        """
-        # This would be a more detailed policy computation
-        # For now, we've already computed basic policies during value function iteration
-        pass
-    
-    def compute_stationary_distribution(self):
-        """
-        Compute the stationary distribution of households over states
-        Returns: distribution array of shape (n_e, n_a, n_m)
-        """
-        # Initialize distribution
-        dist = np.ones((self.n_e, self.n_a, self.n_m))
-        dist = dist / dist.sum()
-        
-        # Iterate until convergence
-        for iter in range(1000):  # Maximum iterations for distribution
-            next_dist = np.zeros_like(dist)
-            
-            # For each current state
-            for e_idx in range(self.n_e):
-                for a_idx in range(self.n_a):
-                    for m_idx in range(self.n_m):
-                        # Current mass at this state
-                        mass = dist[e_idx, a_idx, m_idx]
-                        if mass > 0:
-                            # Policy at this state
-                            a_next = self.policy_a_next[e_idx, a_idx, m_idx]
-                            m_next = self.policy_m_next[e_idx, a_idx, m_idx]
-                            
-                            # Find grid indices for next period assets
-                            a_next_idx = np.searchsorted(self.a_grid, a_next)
-                            if a_next_idx == self.n_a:
-                                a_next_idx = self.n_a - 1
-                                
-                            m_next_idx = np.searchsorted(self.m_grid, m_next)
-                            if m_next_idx == self.n_m:
-                                m_next_idx = self.n_m - 1
-                            
-                            # Transition to next productivity states
-                            for e_next_idx in range(self.n_e):
-                                prob = self.e_transition[e_idx, e_next_idx]
-                                next_dist[e_next_idx, a_next_idx, m_next_idx] += mass * prob
-            
-            # Normalize
-            next_dist = next_dist / next_dist.sum()
-            
-            # Check convergence
-            max_diff = np.max(np.abs(next_dist - dist))
-            if max_diff < 1e-8:
-                print(f"Distribution converged after {iter+1} iterations")
-                break
-                
-            dist = next_dist.copy()
-        
-        return dist
-    
-    def aggregate_quantities(self, prices, dist):
-        """
-        Note: Since the market tightness is independent of skill types z,
-                    we didn't adjust the market clear function since employment will stay the same.
-                - Optimal early consumption supply: z*y_s.
-                - Optimal illiquid asset based on firm's profits Js: z*Φ^f(z).
-                - Demand side: captured skill types through the household distribution.
-        :param return_error: depending on the root-finding algorithm, the return of this function is different
-        :param prices: early consumption price + return of partially liquid assets.
-        :return:
-        """
-
-        Na, mu, rrate, delta = self.Na, self.mu, self.replace_rate, self.delta
-        Nz, zgrid, gz = self.Nz, self.zgrid, self.gz
-        Rm, alpha_1, alpha = self.Rm, self.alpha_1, self.alpha
-        Ag, Rm = self.Ag, self.Rm
-
-        # Unpack the price vector
-        py = prices[0]  # Price of early consumption
-        Rl = prices[1]  # Return on illiquid assets
-
-        # Set taxes (or transfers)
-        tau = np.full((Na, 2, Nz), ((1 / Rl) - 1.0) * Ag)
-        
-        # Calculate optimal early consumption supply
-        Ys = self.κ_prime_inv(py=py)  # Ys = y/z: optimal supply of early consumption goods per unit of productivity
-        
-        # Calculate the total firm revenue for each productivity type
-        # This is the revenue before wage payments, depending on productivity z
-        frev = self.zgrid * (1.0 + py * Ys - self.κ_fun(Ys))
-        
-        # Calculate wage rates for employed workers (share μ of revenue)
-        w1_bar = mu * frev
-        
-        # Calculate unemployment benefits (fraction rrate of employed wage)
-        wo_bar = rrate * w1_bar
-        
-        # Store wage rates in a matrix: [employment status × skill types]
-        wages_bar = np.array([wo_bar, w1_bar])
-
-        # Update total wages including transfers
-        wages = np.zeros((Na, 2, Nz))
-        for j in range(Nz):
-            for i in range(2):
-                wages[:, i, j] = wages_bar[i, j] + tau[:, i, j]
-
-        # Calculate firm profits (revenue minus wage payments)
-        profits = frev - wages_bar[1, :]
-        
-        # Calculate present value of firm profits (Js)
-        self.Js = profits / (1 - (1 - delta) / Rl)
-
-        # Solve for market tightness and employment transition probabilities
-        θ, λ, filling = self.solve_θ(prices=prices)
-        
-        # Update employment transition matrix (2×2 Markov chain)
-        P = np.array([[1 - λ, λ],
-                    [delta, 1 - delta]])
-        
-        # Calculate steady state employment rate
-        emp = λ / (delta + λ)
-        
-        # Calculate total firm revenue (z-dependent)
-        frev = self.zgrid * (1.0 + py * Ys - self.κ_fun(Ys))
-        
-        # Calculate wages (z-dependent)
-        w1_bar = mu * frev  # Employed workers get mu share of revenue
-        wo_bar = rrate * w1_bar  # Unemployed get replacement rate * wage
-        wages_bar = np.array([wo_bar, w1_bar])
-        
-        # Calculate z-dependent profits and job values
-        profits = frev - wages_bar[1, :]
-        Js = profits / (1 - (1 - delta) / Rl)
-        
-        # Calculate z-independent market tightness
-        θ, λ, filling = self.solve_θ(prices=prices)
-
-        # add two more goods
-
-        # Aggregate assets
-        agg_assets = 0
-        agg_money = 0
-        
-        for e_idx in range(self.n_e):
-            for a_idx in range(self.n_a):
-                for m_idx in range(self.n_m):
-                    mass = dist[e_idx, a_idx, m_idx]
-                    agg_assets += mass * self.a_grid[a_idx]
-                    agg_money += mass * self.m_grid[m_idx]
-        
-        return {
-            'K': agg_assets,
-            'M': agg_money
-        }
-    
-    def check_market_clearing(self, dist):
-        """
-        Check if markets clear given current prices and distribution
-        Returns: excess demand in each market
-        """
-        # Get aggregate quantities
-        agg = self.aggregate_quantities(dist)
-        
-        # Capital market clearing (simplified)
-        capital_excess = agg['K'] - self.target_capital()
-        
-        # Money market clearing (simplified)
-        money_excess = agg['M'] - self.money_supply()
-        
-        return {
-            'capital_excess': capital_excess,
-            'money_excess': money_excess
-        }
-    
-    def target_capital(self):
-        """Target capital based on current interest rate"""
-        # Placeholder - this would depend on production function
-        return 10.0
-    
-    def money_supply(self):
-        """Money supply (exogenous in basic model)"""
-        # Placeholder
-        return 5.0
-    
-    def update_prices(self, excess):
-        """
-        Update prices based on excess demand
-        Returns: new prices (phi_m, interest_rate)
-        """
-        # Damped price adjustment
-        damping = 0.3
-        
-        # Update interest rate based on capital excess
-        dr = -0.01 * excess['capital_excess']
-        new_r = self.interest_rate + damping * dr
-        
-        # Update money price based on money excess
-        dphi = -0.01 * excess['money_excess'] / self.money_supply()
-        new_phi = self.phi_m + damping * dphi
-        
-        return new_phi, new_r
-    
-    def solve_equilibrium(self, max_price_iter=20):
-        """
-        Solve for general equilibrium prices
-        """
-        for iter in range(max_price_iter):
-            print(f"\nPrice iteration {iter+1}")
-            print(f"Current prices: phi_m = {self.phi_m:.6f}, r = {self.interest_rate:.6f}")
-            
-            # Solve individual problem given prices
-            self.solve_bellman_iteration()
-            
-            # Compute stationary distribution
-            dist = self.compute_stationary_distribution()
-            
-            # Check market clearing
-            excess = self.check_market_clearing(dist)
-            print(f"Market clearing errors: Capital = {excess['capital_excess']:.6f}, Money = {excess['money_excess']:.6f}")
-            
-            # Check if markets approximately clear
-            if abs(excess['capital_excess']) < 0.01 and abs(excess['money_excess']) < 0.01:
-                print("Equilibrium found!")
-                break
-            
-            # Update prices
-            new_phi, new_r = self.update_prices(excess)
-            
-            # Apply price updates
-            self.phi_m = new_phi
-            self.interest_rate = new_r
-        
-        # Return final equilibrium objects
-        return {
-            'value_function': self.V,
-            'policy_c': self.policy_c,
-            'policy_a': self.policy_a_next,
-            'policy_m': self.policy_m_next,
-            'distribution': dist,
-            'phi_m': self.phi_m,
-            'interest_rate': self.interest_rate
-        }
-    
-
-    def visualize_convergence(self, iter_count):
-        """Generate visualizations to track convergence progress"""
-        # Only show for selected states to avoid clutter
-        e_idx = 1  # Employed
-        z_idx = 1  # Medium skill
-        
-        plt.figure(figsize=(15, 10))
-        
-        # Plot W value function for different asset levels
-        plt.subplot(2, 2, 1)
-        D_idx = self.n_D // 2  # Mid-point of deposit grid
-        plt.plot(self.a_grid, self.W[0, :, D_idx, z_idx], 'b-', label='Unemployed')
-        plt.plot(self.a_grid, self.W[1, :, D_idx, z_idx], 'r-', label='Employed')
-        plt.title(f'CM Value Function (Iteration {iter_count})')
-        plt.xlabel('Assets')
-        plt.ylabel('Value')
-        plt.legend()
-        
-        # Plot V value function
-        plt.subplot(2, 2, 2)
-        m_idx = self.n_m // 2  # Mid-point of money grid
-        plt.plot(self.a_grid, self.V[0, :, m_idx, z_idx], 'b-', label='Unemployed')
-        plt.plot(self.a_grid, self.V[1, :, m_idx, z_idx], 'r-', label='Employed')
-        plt.title('DM Value Function')
-        plt.xlabel('Assets')
-        plt.ylabel('Value')
-        plt.legend()
-        
-        # Plot consumption policy
-        plt.subplot(2, 2, 3)
-        plt.plot(self.a_grid, self.policy_c[0, :, D_idx, z_idx], 'b-', label='Unemployed')
-        plt.plot(self.a_grid, self.policy_c[1, :, D_idx, z_idx], 'r-', label='Employed')
-        plt.title('Consumption Policy')
-        plt.xlabel('Assets')
-        plt.ylabel('Consumption')
-        plt.legend()
-        
-        # Plot next period asset policy
-        plt.subplot(2, 2, 4)
-        plt.plot(self.a_grid, self.policy_a_next[0, :, D_idx, z_idx], 'b-', label='Unemployed')
-        plt.plot(self.a_grid, self.policy_a_next[1, :, D_idx, z_idx], 'r-', label='Employed')
-        plt.plot(self.a_grid, self.a_grid, 'k--', label='45-degree line')
-        plt.title('Next Period Assets Policy')
-        plt.xlabel('Current Assets')
-        plt.ylabel('Next Period Assets')
-        plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig(f'convergence_iter_{iter_count}.png')
-        plt.close()
-
-    def visualize_solution(self):
-        """Generate comprehensive visualizations to verify economic sensibility of the solution"""
-        # Create a folder for visualizations if it doesn't exist
-        import os
-        os.makedirs('visualizations', exist_ok=True)
-        
-        # 1. Value Functions
-        plt.figure(figsize=(15, 12))
-        
-        # Plot CM value function (W) by employment and skill
-        for z_idx in range(self.n_z):
-            plt.subplot(3, 2, z_idx*2 + 1)
-            D_idx = self.n_D // 2  # Middle of deposit grid
-            plt.plot(self.a_grid, self.W[0, :, D_idx, z_idx], 'b-', label='Unemployed')
-            plt.plot(self.a_grid, self.W[1, :, D_idx, z_idx], 'r-', label='Employed')
-            plt.title(f'CM Value Function (Skill Level {z_idx})')
-            plt.xlabel('Assets')
-            plt.ylabel('Value')
-            plt.legend()
-            
-            # Plot DM value function (V) by employment and skill
-            plt.subplot(3, 2, z_idx*2 + 2)
-            m_idx = self.n_m // 2  # Middle of money grid
-            plt.plot(self.a_grid, self.V[0, :, m_idx, z_idx], 'b-', label='Unemployed')
-            plt.plot(self.a_grid, self.V[1, :, m_idx, z_idx], 'r-', label='Employed')
-            plt.title(f'DM Value Function (Skill Level {z_idx})')
-            plt.xlabel('Assets')
-            plt.ylabel('Value')
-            plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig('visualizations/value_functions.png')
+        # Save figure
+        plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust for suptitle
+        plt.savefig(f'plots/value_functions_iter_{iteration}.png')
         plt.close()
         
-        # 2. CM Policy Functions
-        plt.figure(figsize=(15, 12))
+        # Create another figure for policy functions
+        fig, axes = plt.subplots(3, 2, figsize=(12, 14))
+        fig.suptitle(f'Policy Functions - Iteration {iteration}', fontsize=16)
         
-        # Plot consumption policy
-        for z_idx in range(self.n_z):
-            plt.subplot(3, 2, z_idx*2 + 1)
-            D_idx = self.n_D // 2  # Middle of deposit grid
-            plt.plot(self.a_grid, self.policy_c[0, :, D_idx, z_idx], 'b-', label='Unemployed')
-            plt.plot(self.a_grid, self.policy_c[1, :, D_idx, z_idx], 'r-', label='Employed')
-            plt.title(f'Consumption Policy (Skill Level {z_idx})')
-            plt.xlabel('Assets')
-            plt.ylabel('Consumption')
-            plt.legend()
+        # Plot policy functions for asset accumulation across employment status
+        for z_idx in range(min(self.n_z, axes.shape[0])):
+            # Get policy functions for asset accumulation (a')
+            # Average across deposit and loan dimensions
+            a_prime_employed = np.mean(cm_results['a_p'][:, :, :, z_idx, 1], axis=(1, 2))
+            a_prime_unemployed = np.mean(cm_results['a_p'][:, :, :, z_idx, 0], axis=(1, 2))
             
-            # Plot asset policy with 45-degree line
-            plt.subplot(3, 2, z_idx*2 + 2)
-            plt.plot(self.a_grid, self.policy_a_next[0, :, D_idx, z_idx], 'b-', label='Unemployed')
-            plt.plot(self.a_grid, self.policy_a_next[1, :, D_idx, z_idx], 'r-', label='Employed')
-            plt.plot(self.a_grid, self.a_grid, 'k--', label='45-degree line')
-            plt.title(f'Next Period Assets (Skill Level {z_idx})')
-            plt.xlabel('Current Assets')
-            plt.ylabel('Next Period Assets')
-            plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig('visualizations/cm_policies.png')
-        plt.close()
-        
-        # 3. Money Policies
-        plt.figure(figsize=(15, 12))
-        
-        # Plot money holding policy
-        for z_idx in range(self.n_z):
-            plt.subplot(3, 2, z_idx*2 + 1)
-            D_idx = self.n_D // 2  # Middle of deposit grid
-            plt.plot(self.a_grid, self.policy_m_next[0, :, D_idx, z_idx], 'b-', label='Unemployed')
-            plt.plot(self.a_grid, self.policy_m_next[1, :, D_idx, z_idx], 'r-', label='Employed')
-            plt.title(f'Money Holding Policy (Skill Level {z_idx})')
-            plt.xlabel('Assets')
-            plt.ylabel('Next Period Money')
-            plt.legend()
+            # Plot asset accumulation policies
+            axes[z_idx, 0].plot(self.a_grid, self.a_grid, 'k--', label='45° line')
+            axes[z_idx, 0].plot(self.a_grid, a_prime_employed, label='Employed')
+            axes[z_idx, 0].plot(self.a_grid, a_prime_unemployed, label='Unemployed')
+            axes[z_idx, 0].set_title(f'Asset Accumulation (z={self.z_grid[z_idx]:.2f})')
+            axes[z_idx, 0].set_xlabel('Current Assets (a)')
+            axes[z_idx, 0].set_ylabel('Next Period Assets (a\')')
+            axes[z_idx, 0].legend()
+            axes[z_idx, 0].grid(True)
             
-            # Plot money-to-asset ratio
-            plt.subplot(3, 2, z_idx*2 + 2)
-            money_ratio_unemployed = self.policy_m_next[0, :, D_idx, z_idx] / (self.policy_a_next[0, :, D_idx, z_idx] + 1e-8)
-            money_ratio_employed = self.policy_m_next[1, :, D_idx, z_idx] / (self.policy_a_next[1, :, D_idx, z_idx] + 1e-8)
-            plt.plot(self.a_grid, money_ratio_unemployed, 'b-', label='Unemployed')
-            plt.plot(self.a_grid, money_ratio_employed, 'r-', label='Employed')
-            plt.title(f'Money-to-Asset Ratio (Skill Level {z_idx})')
-            plt.xlabel('Assets')
-            plt.ylabel('Money/Assets Ratio')
-            plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig('visualizations/money_policies.png')
-        plt.close()
-        
-        # 4. DM Policy Functions by Skill Type
-        for z_idx in range(self.n_z):
-            plt.figure(figsize=(15, 12))
+            # Plot money holdings policy
+            m_prime_employed = np.mean(cm_results['a_m'][:, :, :, z_idx, 1], axis=(1, 2))
+            m_prime_unemployed = np.mean(cm_results['a_m'][:, :, :, z_idx, 0], axis=(1, 2))
             
-            # Early consumption when only money accepted (ω=0)
-            plt.subplot(3, 2, 1)
-            a_idx = self.n_a // 2  # Middle of asset grid
-            plt.plot(self.m_grid, self.policy_y[0, a_idx, :, z_idx, 0], 'b-', label='Unemployed')
-            plt.plot(self.m_grid, self.policy_y[1, a_idx, :, z_idx, 0], 'r-', label='Employed')
-            plt.title(f'Early Consumption (ω=0, Skill Level {z_idx})')
-            plt.xlabel('Money Holdings')
-            plt.ylabel('Consumption in DM')
-            plt.legend()
-            
-            # Early consumption when both assets accepted (ω=1)
-            plt.subplot(3, 2, 2)
-            plt.plot(self.m_grid, self.policy_y[0, a_idx, :, z_idx, 1], 'b-', label='Unemployed')
-            plt.plot(self.m_grid, self.policy_y[1, a_idx, :, z_idx, 1], 'r-', label='Employed')
-            plt.title(f'Early Consumption (ω=1, Skill Level {z_idx})')
-            plt.xlabel('Money Holdings')
-            plt.ylabel('Consumption in DM')
-            plt.legend()
-            
-            # Borrowing when only money accepted (ω=0)
-            plt.subplot(3, 2, 3)
-            plt.plot(self.m_grid, self.policy_b[0, a_idx, :, z_idx, 0], 'b-', label='Unemployed')
-            plt.plot(self.m_grid, self.policy_b[1, a_idx, :, z_idx, 0], 'r-', label='Employed')
-            plt.title(f'Borrowing (ω=0, Skill Level {z_idx})')
-            plt.xlabel('Money Holdings')
-            plt.ylabel('Borrowing Amount')
-            plt.legend()
-            
-            # Borrowing when both assets accepted (ω=1)
-            plt.subplot(3, 2, 4)
-            plt.plot(self.m_grid, self.policy_b[0, a_idx, :, z_idx, 1], 'b-', label='Unemployed')
-            plt.plot(self.m_grid, self.policy_b[1, a_idx, :, z_idx, 1], 'r-', label='Employed')
-            plt.title(f'Borrowing (ω=1, Skill Level {z_idx})')
-            plt.xlabel('Money Holdings')
-            plt.ylabel('Borrowing Amount')
-            plt.legend()
-            
-            # Deposit policy
-            plt.subplot(3, 2, 5)
-            plt.plot(self.m_grid, self.policy_d[0, a_idx, :, z_idx], 'b-', label='Unemployed')
-            plt.plot(self.m_grid, self.policy_d[1, a_idx, :, z_idx], 'r-', label='Employed')
-            plt.title(f'Deposit Policy (Skill Level {z_idx})')
-            plt.xlabel('Money Holdings')
-            plt.ylabel('Deposit Amount')
-            plt.legend()
-            
-            # Deposit-to-money ratio
-            plt.subplot(3, 2, 6)
-            deposit_ratio_unemployed = self.policy_d[0, a_idx, :, z_idx] / (self.m_grid + 1e-8)
-            deposit_ratio_employed = self.policy_d[1, a_idx, :, z_idx] / (self.m_grid + 1e-8)
-            plt.plot(self.m_grid, deposit_ratio_unemployed, 'b-', label='Unemployed')
-            plt.plot(self.m_grid, deposit_ratio_employed, 'r-', label='Employed')
-            plt.title(f'Deposit-to-Money Ratio (Skill Level {z_idx})')
-            plt.xlabel('Money Holdings')
-            plt.ylabel('Deposit/Money Ratio')
-            plt.legend()
-            
-            plt.tight_layout()
-            plt.savefig(f'visualizations/dm_policies_skill_{z_idx}.png')
-            plt.close()
+            axes[z_idx, 1].plot(self.a_grid, m_prime_employed, label='Employed')
+            axes[z_idx, 1].plot(self.a_grid, m_prime_unemployed, label='Unemployed')
+            axes[z_idx, 1].set_title(f'Money Holdings (z={self.z_grid[z_idx]:.2f})')
+            axes[z_idx, 1].set_xlabel('Current Assets (a)')
+            axes[z_idx, 1].set_ylabel('Money Holdings (m\')')
+            axes[z_idx, 1].legend()
+            axes[z_idx, 1].grid(True)
         
-        # 5. Heat Maps for Policy Functions
-        # This helps visualize how policies change across both asset and money dimensions
-        for z_idx in range(self.n_z):
-            for e_idx in range(self.n_e):
-                employment_status = "Employed" if e_idx == 1 else "Unemployed"
-                
-                # Early consumption heat maps
-                fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-                
-                # For ω=0
-                im0 = axes[0].imshow(
-                    self.policy_y[e_idx, :, :, z_idx, 0],
-                    extent=[self.m_grid[0], self.m_grid[-1], self.a_grid[0], self.a_grid[-1]],
-                    aspect='auto',
-                    origin='lower',
-                    cmap='viridis'
-                )
-                axes[0].set_title(f'Early Consumption (ω=0, {employment_status}, Skill {z_idx})')
-                axes[0].set_xlabel('Money Holdings')
-                axes[0].set_ylabel('Asset Holdings')
-                plt.colorbar(im0, ax=axes[0])
-                
-                # For ω=1
-                im1 = axes[1].imshow(
-                    self.policy_y[e_idx, :, :, z_idx, 1],
-                    origin='lower',
-                    cmap='coolwarm'
-                )
-                axes[0].set_title(f'Borrowing (ω=0, {employment_status}, Skill {z_idx})')
-                axes[0].set_xlabel('Money Holdings')
-                axes[0].set_ylabel('Asset Holdings')
-                plt.colorbar(im0, ax=axes[0])
-                
-                # Borrowing for ω=1
-                im1 = axes[1].imshow(
-                    self.policy_b[e_idx, :, :, z_idx, 1],
-                    extent=[self.m_grid[0], self.m_grid[-1], self.a_grid[0], self.a_grid[-1]],
-                    aspect='auto',
-                    origin='lower',
-                    cmap='coolwarm'
-                )
-                axes[1].set_title(f'Borrowing (ω=1, {employment_status}, Skill {z_idx})')
-                axes[1].set_xlabel('Money Holdings')
-                axes[1].set_ylabel('Asset Holdings')
-                plt.colorbar(im1, ax=axes[1])
-                
-                # Deposits
-                im2 = axes[2].imshow(
-                    self.policy_d[e_idx, :, :, z_idx],
-                    extent=[self.m_grid[0], self.m_grid[-1], self.a_grid[0], self.a_grid[-1]],
-                    aspect='auto',
-                    origin='lower',
-                    cmap='viridis'
-                )
-                axes[2].set_title(f'Deposits ({employment_status}, Skill {z_idx})')
-                axes[2].set_xlabel('Money Holdings')
-                axes[2].set_ylabel('Asset Holdings')
-                plt.colorbar(im2, ax=axes[2])
-                
-                plt.tight_layout()
-                plt.savefig(f'visualizations/heatmap_borrowing_deposit_{employment_status}_skill_{z_idx}.png')
-                plt.close()
-
-    def diagnostic_pre_dm(self, iter_count):
-        """Economic diagnostic checks before DM stage"""
-        os.makedirs('diagnostics', exist_ok=True)
-        
-        plt.figure(figsize=(15, 10))
-        
-        # 1. Check wage distribution
-        plt.subplot(2, 2, 1)
-        for z_idx in range(self.n_z):
-            plt.plot(self.a_grid, self.wages[:, 1, z_idx], label=f'Skill {z_idx}')
-        plt.title('Wage Distribution by Skill Level')
-        plt.xlabel('Assets')
-        plt.ylabel('Wage')
-        plt.legend()
-        
-        # 2. Check resource feasibility
-        plt.subplot(2, 2, 2)
-        z_idx = 1  # Medium skill
-        plt.plot(self.a_grid, self.wages[:, 0, z_idx], label='Unemployed')
-        plt.plot(self.a_grid, self.wages[:, 1, z_idx], label='Employed')
-        plt.title('Wage Gap (Medium Skill)')
-        plt.xlabel('Assets')
-        plt.ylabel('Wage')
-        plt.legend()
-        
-        # 3. Value function shape check
-        plt.subplot(2, 2, 3)
-        D_idx = self.n_D // 2
-        for z_idx in range(self.n_z):
-            plt.plot(self.a_grid, self.W[1, :, D_idx, z_idx], label=f'Skill {z_idx}')
-        plt.title('Value Function by Skill (Employed)')
-        plt.xlabel('Assets')
-        plt.ylabel('Value')
-        plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig(f'diagnostics/pre_dm_iter_{iter_count}.png')
+        # Save policy functions figure
+        plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust for suptitle
+        plt.savefig(f'plots/policy_functions_iter_{iteration}.png')
         plt.close()
 
-    def diagnostic_post_dm(self, iter_count):
-        """Economic diagnostic checks after DM stage"""
-        plt.figure(figsize=(15, 10))
-        
-        # 1. DM consumption policy check
-        z_idx = 1  # Medium skill
-        plt.subplot(2, 2, 1)
-        a_idx = self.n_a // 2  # Middle of asset grid
-        plt.plot(self.m_grid, self.policy_y[0, a_idx, :, z_idx, 0], label='Unemployed ω=0')
-        plt.plot(self.m_grid, self.policy_y[1, a_idx, :, z_idx, 0], label='Employed ω=0')
-        plt.title('DM Consumption (Money Only)')
-        plt.xlabel('Money Holdings')
-        plt.ylabel('Consumption')
-        plt.legend()
-        
-        # 2. Money holdings distribution
-        plt.subplot(2, 2, 2)
-        m_idx = self.n_m // 2
-        for z_idx in range(self.n_z):
-            plt.plot(self.a_grid, self.V[1, :, m_idx, z_idx], label=f'Skill {z_idx}')
-        plt.title('DM Value by Skill Level')
-        plt.xlabel('Assets')
-        plt.ylabel('Value')
-        plt.legend()
-        
-        # 3. Borrowing policy check
-        plt.subplot(2, 2, 3)
-        plt.plot(self.m_grid, self.policy_b[0, a_idx, :, z_idx, 0], label='Unemployed ω=0')
-        plt.plot(self.m_grid, self.policy_b[1, a_idx, :, z_idx, 0], label='Employed ω=0')
-        plt.title('Borrowing Policy')
-        plt.xlabel('Money Holdings')
-        plt.ylabel('Borrowing Amount')
-        plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig(f'diagnostics/post_dm_iter_{iter_count}.png')
-        plt.close()
-
-    def diagnostic_post_cm(self, iter_count):
-        """Economic diagnostic checks after CM stage"""
-        plt.figure(figsize=(15, 10))
-        
-        # 1. Consumption policy check
-        z_idx = 1  # Medium skill
-        D_idx = self.n_D // 2
-        plt.subplot(2, 2, 1)
-        plt.plot(self.a_grid, self.policy_c[0, :, D_idx, z_idx], label='Unemployed')
-        plt.plot(self.a_grid, self.policy_c[1, :, D_idx, z_idx], label='Employed')
-        plt.title('CM Consumption Policy')
-        plt.xlabel('Assets')
-        plt.ylabel('Consumption')
-        plt.legend()
-        
-        # 2. Asset accumulation check
-        plt.subplot(2, 2, 2)
-        plt.plot(self.a_grid, self.policy_a_next[0, :, D_idx, z_idx], label='Unemployed')
-        plt.plot(self.a_grid, self.policy_a_next[1, :, D_idx, z_idx], label='Employed')
-        plt.plot(self.a_grid, self.a_grid, 'k--', label='45° line')
-        plt.title('Asset Accumulation')
-        plt.xlabel('Current Assets')
-        plt.ylabel('Next Period Assets')
-        plt.legend()
-        
-        # 3. Budget constraint check
-        plt.subplot(2, 2, 3)
-        resources = self.wages[:, 1, z_idx]  # Employed resources
-        portfolio = (self.policy_a_next[1, :, D_idx, z_idx] / self.prices[1] + 
-                    self.policy_m_next[1, :, D_idx, z_idx] * self.prices[2])
-        plt.plot(self.a_grid, resources, label='Resources')
-        plt.plot(self.a_grid, portfolio, label='Portfolio Cost')
-        plt.plot(self.a_grid, self.policy_c[1, :, D_idx, z_idx], label='Consumption')
-        plt.title('Budget Constraint Check (Employed)')
-        plt.xlabel('Assets')
-        plt.ylabel('Value')
-        plt.legend()
-        
-        plt.tight_layout()
-        plt.savefig(f'diagnostics/post_cm_iter_{iter_count}.png')
-        plt.close()
-
-
-# Example usage
+    
 if __name__ == "__main__":
     params = {
-        'beta': 0.96,
-        'alpha': 0.075,  # Probability of needing to consume in DM
-        'alpha_1': 0.06,  # Prob. of case where cash and assets accepted
-        'gamma': 1.5, # curvature of late utility
-        'Psi': 2.2,  # level of early utility
-        'psi': 0.28, # curvature of early utility
-        'zeta': 0.75, # curvature of production function
-        'nu': 1.6, # matching function curvature
-        'mu': 0.7, # share of revenue going to workers
-        'delta': 0.035, # job destruction rate
-        'kappa': 7.29, # job posting cost
-        'repl_rate': 0.4, # fraction of unemployment compensation / working wage income
-        'py': 1.0,  # price of early consumption goods
-        'Rl': 1.03,  # return on illiquid assets
-        'phi_m': 1.0,  # price of money
-        'i': 0.02,  # nominal interest rate
-        'n_a': 50,
-        'n_m': 30,
-        'n_z': 3, # number of productivity states
-        'n_e': 2, # number of employment states
-        'a_min': 0.0,
-        'a_max': 15.0,
-        'm_min': 0.0,
-        'm_max': 5.0,
-        'phi_m': 1.0,
-        'interest_rate': 0.03,
-        'max_iter': 500,
-        'tol': 1e-5
+        # Preference parameters
+        'beta': 0.96,      # Discount factor
+        'alpha': 0.075,    # Probability of DM consumption opportunity
+        'alpha_1': 0.06,   # Probability of accepting both money and assets
+        'gamma': 1.5,      # Risk aversion parameter
+        'Psi': 2.2,       # DM utility scaling parameter
+        
+        # Production and labor market parameters
+        'psi': 0.28,      # Matching function elasticity
+        'zeta': 0.75,     # Worker bargaining power
+        'nu': 1.6,        # Labor supply elasticity
+        'mu': 0.7,        # Matching efficiency
+        'delta': 0.035,   # Job separation rate
+        'kappa': 7.29,    # Vacancy posting cost
+        'repl_rate': 0.4, # Unemployment benefit replacement rate
+
+        # DM parameters
+        'c_min': 1e-2,    # minimum consumption
+        
+        # Grid specifications
+        'n_a': 50,       # Number of asset grid points
+        'n_m': 20,        # Number of money grid points
+        'n_d': 20,        # Number of deposit grid points
+        'n_l': 25,        # Number of loan grid points
+        'a_min': 0.0,     # Minimum asset value
+        'a_max': 20.0,    # Maximum asset value
+        'm_min': 0.0,     # Minimum money holdings
+        'm_max': 15.0,    # Maximum money holdings
+        'l_min': 0,       # Minimum loan value
+        'l_max': 15.0,    # Maximum loan value
+        'd_min': 0,       # Minimum deposit value
+        'd_max': 15.0,    # Maximum deposit value
+        'ny': 100,        # Number of grid points for DM goods
+        
+        # Price parameters
+        'py': 1.0,        # Price of DM goods
+        'Rl': 1.03,       # Return on illiquid assets
+        'i': 0.02,        # Nominal interest rate
+        'Rm': (1.0-0.014)**(1.0/12.0),   # Gross return of real money balances (exogenous)
+
+        # Government Spending
+        'Ag0': 0.1,       # Exogenous government spending 
+
+        # Convergence parameters
+        'max_iter': 100,   # Maximum number of iterations
+        'tol': 1e-5       # Convergence tolerance
     }
-    
-   # Initialize and solve model
+
+    # Initialize solver with parameters
+    print("Initializing LagosWrightAiyagariSolver...")
     solver = LagosWrightAiyagariSolver(params)
     
-    # Test for uniqueness with different initial guesses
-    print("Testing uniqueness with different initial value function guesses...")
+    # Set baseline prices
+    baseline_prices = np.array([
+        params['py'],      # Price of DM goods
+        params['Rl'],      # Return on illiquid assets
+        params['i']        # Nominal interest rate
+    ])
     
-    # Store initial value function
-    original_V = solver.V.copy()
+    # Print initial conditions
+    print("\nInitial conditions:")
+    print(f"  Labor market tightness: {solver.market_tightness:.4f}")
+    print(f"  Job finding probability: {solver.job_finding_prob:.4f}")
+    print(f"  Employment rate: {solver.emp_rate:.4f}")
+    print(f"  Wages (employed, z=1): {solver.wages[1, 1]:.4f}")
+    print(f"  Wages (unemployed, z=1): {solver.wages[1, 0]:.4f}")
     
-    # Solve with original guess
-    solver.solve_bellman_iteration()
-    solution1 = solver.V.copy()
+    # Solve the model
+    print("\nSolving model...")
+    solution = solver.solve_model(prices=baseline_prices, plot_frequency=5)
     
-    # Perturb value function and resolve
-    print("\nResolving with perturbed value function...")
-    solver.V = original_V * 1.2  # 20% higher
-    solver.solve_bellman_iteration()
-    solution2 = solver.V.copy()
+    # Print results
+    print("\nSolution results:")
+    print(f"  Converged: {solution['converged']}")
+    print(f"  Iterations: {solution['iterations']}")
+    print(f"  Total time: {solution['total_time']:.2f} seconds")
+    print(f"  Final max diff: {solution['history']['max_diff'][-1]:.6e}")
     
-    # Check if solutions converge to the same point
-    max_diff = np.max(np.abs(solution1 - solution2))
-    print(f"\nMaximum difference between solutions: {max_diff:.8f}")
-    
-    if max_diff < 1e-4:
-        print("Value function appears to converge to a unique solution!")
-    else:
-        print("Warning: Solutions differ - may indicate multiple equilibria or convergence issues")
-    
-    # Solve for equilibrium prices
-    print("\nSolving for general equilibrium...")
-    equilibrium = solver.solve_equilibrium(max_price_iter=10)
-    
-    # Visualize policy functions
-    e_mid = solver.n_e // 2  # Middle productivity state
-    plt.figure(figsize=(12, 8))
-    
-    plt.subplot(2, 2, 1)
-    for m_idx in [0, solver.n_m//2, solver.n_m-1]:
-        plt.plot(solver.a_grid, solver.policy_c[e_mid, :, m_idx], 
-                 label=f"Money = {solver.m_grid[m_idx]:.2f}")
-    plt.title("Consumption Policy")
-    plt.xlabel("Assets")
-    plt.ylabel("Consumption")
+    # Plot convergence history
+    plt.figure(figsize=(10, 6))
+    plt.semilogy(range(1, len(solution['history']['max_diff'])+1), 
+                solution['history']['max_diff'], 'b-', label='Max Diff')
+    plt.semilogy(range(1, len(solution['history']['mean_diff'])+1), 
+                solution['history']['mean_diff'], 'r--', label='Mean Diff')
+    plt.axhline(y=params['tol'], color='k', linestyle=':', label='Tolerance')
+    plt.xlabel('Iteration')
+    plt.ylabel('Value Function Difference (log scale)')
+    plt.title('Convergence History')
     plt.legend()
+    plt.grid(True)
+    plt.savefig('plots/convergence_history.png')
     
-    plt.subplot(2, 2, 2)
-    for m_idx in [0, solver.n_m//2, solver.n_m-1]:
-        plt.plot(solver.a_grid, solver.policy_a_next[e_mid, :, m_idx], 
-                 label=f"Money = {solver.m_grid[m_idx]:.2f}")
-    plt.title("Asset Policy")
-    plt.xlabel("Assets")
-    plt.ylabel("Next Period Assets")
-    plt.legend()
-    
-    plt.subplot(2, 2, 3)
-    for m_idx in [0, solver.n_m//2, solver.n_m-1]:
-        plt.plot(solver.a_grid, solver.policy_m_next[e_mid, :, m_idx], 
-                 label=f"Money = {solver.m_grid[m_idx]:.2f}")
-    plt.title("Money Policy")
-    plt.xlabel("Assets")
-    plt.ylabel("Next Period Money")
-    plt.legend()
-    
-    plt.subplot(2, 2, 4)
-    # Simplify to 2D for visualization (sum over money dimension)
-    stationary_dist_2d = np.sum(equilibrium['distribution'], axis=2)
-    plt.imshow(stationary_dist_2d, aspect='auto', origin='lower',
-              extent=[solver.a_grid[0], solver.a_grid[-1], 
-                     solver.e_grid[0], solver.e_grid[-1]])
-    plt.colorbar(label="Mass")
-    plt.title("Stationary Distribution")
-    plt.xlabel("Assets")
-    plt.ylabel("Productivity")
-    
-    plt.tight_layout()
-    plt.show()
+    print("\nAnalysis complete. Check the 'plots' directory for visualizations.")
