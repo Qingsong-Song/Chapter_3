@@ -2,10 +2,27 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import time
+import pandas as pd
+import sys
+
+
+def find_nearest_index(grid, value):
+    """Find index of the nearest grid point to a given value"""
+    idx = np.abs(grid - value).argmin()
+    return idx
+
+
+def find_nearest_lower_index(grid, value):
+    """Find index of the nearest grid point less than or equal to a given value"""
+    indices = np.where(grid <= value)[0]
+    if len(indices) == 0:
+        return 0
+    return indices[-1]
+
 
 class LagosWrightAiyagariSolver:
     def __init__(self, params):
-        """Initialize solver with model parameters"""
+        """Initialise solver with model parameters"""
         # Preference parameters
         self.beta = params['beta']      # Discount factor
         self.alpha = params['alpha']    # Probability of DM consumption opportunity
@@ -26,61 +43,69 @@ class LagosWrightAiyagariSolver:
         # Grid specifications
         self.n_a = params['n_a']       # Number of asset grid points
         self.n_m = params['n_m']       # Number of money grid points
+        self.n_f = params['n_f']       # Number of illiquid asset grid points
         self.n_d = params['n_d']       # Number of deposit grid points
         self.n_l = params['n_l']       # Number of loan grid points
-        self.a_min = params['a_min']   # Minimum asset value
         self.a_max = params['a_max']   # Maximum asset value
+        self.a_min = params['a_min']   # Minimum asset value
         self.m_min = params['m_min']   # Minimum money holdings
         self.m_max = params['m_max']   # Maximum money holdings
-        self.l_min = params['l_min']   # Minimum deposit/loan value
-        self.l_max = params['l_max']   # Maximum deposit/loan value
+        self.f_min = params['f_min']   # Minimum illiquid asset holdings
+        self.f_max = params['f_max']   # Maximum illiquid asset holdings
+        self.l_min = params['l_min']   # Minimum loan value
+        self.l_max = params['l_max']   # Maximum loan value
+        self.d_min = params['d_min']   # Minimum deposit value
+        self.d_max = params['d_max']   # Maximum deposit value
         self.n_e = 2                   # Employment states: [0=unemployed, 1=employed]
         self.n_z = 3                   # Skill types: [0=low, 1=medium, 2=high]
-        self.ny = 300                  # Number of grid points for DM goods
-        self.nd = 50                   # Number of grid points for deposit/loan
+        self.ny = params['ny']         # Number of grid points for DM goods
 
-        # for computation
+        # For computation
         self.c_min = params['c_min']   # Minimum consumption
-        self.Rm = params['Rm']       # Gross return of real money balances (exogenous)
+        self.Rm = params['Rm']         # Gross return of real money balances (exogenous)
         
         # Price parameters
         self.prices = np.array([
             params['py'],              # Price of DM goods
-            params['Rl'],             # Return on illiquid assets
-            params['i']              # Nominal rate from banks
+            params['Rl'],              # Return on illiquid assets
+            params['i']                # Nominal rate from banks
         ])
         
         # Convergence parameters
         self.max_iter = params['max_iter']
         self.tol = params['tol']
         
-        
         # Initialize grids
         self.setup_grids(params)
-
         
         # Initialize labor market
         self.initialise_labor_market()
 
         # Initialize value and policy functions
-        self.initialize_functions()
+        self.initialise_functions()
+        
+        # For storing value function history
+        self.value_history = {
+            'W': [],
+            'V': []
+        }
 
     
     def setup_grids(self, params):
         """Set up state space grids with appropriate spacing"""
         # Asset grid
         self.a_grid = np.linspace(params['a_min'], params['a_max'], self.n_a)
-        
+
         # Money holdings grid
         self.m_grid = np.linspace(params['m_min'], params['m_max'], self.n_m)
 
         # Illiquid asset grid
-        self.f_grid = np.linspace(params['a_min'], params['a_max'], self.n_f)
+        self.f_grid = np.linspace(params['f_min'], params['f_max'], self.n_f)
         
         # Deposit grid (real terms)
-        self.d_grid = np.linspace(params['m_min'], params['m_max'], self.n_m)
+        self.d_grid = np.linspace(params['d_min'], params['d_max'], self.n_d)
 
-        # loan grid (real terms)
+        # Loan grid (real terms)
         self.l_grid = np.linspace(params['l_min'], params['l_max'], self.n_l)
         
         # Employment grid
@@ -93,54 +118,53 @@ class LagosWrightAiyagariSolver:
         self.z_dist = np.array([0.62, 0.28, 0.1])  # Distribution of skill types
 
     
-    def initialize_functions(self):
-        """Initialize value and policy functions with reasonable guesses"""
-        # Initialize arrays
+    def initialise_functions(self):
+        """Initialise value and policy functions with reasonable guesses"""
+        # Initialize arrays using m and f as state variables
         self.W = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
-        self.V = np.zeros((self.n_a, self.n_m, self.n_z, self.n_e))
+        self.V = np.zeros((self.n_m, self.n_f, self.n_z, self.n_e))
         
-        # Initialize W with reasonable guesses using a utility-based approach
-        # For each state, estimate a consumption level and calculate utility
+        # Initialise W with reasonable guesses using a utility-based approach
         for e_idx, e in enumerate(self.e_grid):
             for z_idx, z in enumerate(self.z_grid):
                 # Estimate income based on skill and employment
-                income_est = self.wages[z_idx, e_idx]  # Rough estimate: unemployed get ~50% of employed income
+                income_est = self.wages[z_idx, e_idx]
                 
                 for a_idx, a in enumerate(self.a_grid):
                     for d_idx, d in enumerate(self.d_grid):
                         for l_idx, l in enumerate(self.l_grid):
                             # Estimate resources available for consumption
                             resources = a + (1 + self.prices[2]) * d - (1 + self.prices[2]) * l + income_est
-                            
+
                             # Ensure minimum consumption
                             consumption = max(resources * 0.9, self.c_min)  # Consume ~90% of resources
-                            
+
                             # Calculate utility and scale for perpetuity
                             self.W[a_idx, d_idx, l_idx, z_idx, e_idx] = self.utility(consumption)
         
         # Initialize V based on W
-        # For each state, estimate best deposit/loan choice and map to V
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
-                for a_idx, a in enumerate(self.a_grid):
-                    for m_idx, m in enumerate(self.m_grid):
+                for m_idx, m in enumerate(self.m_grid):
+                    for f_idx, f in enumerate(self.f_grid):
                         # Simple estimate: deposit all money, no loans
                         d_est = m
                         l_est = 0
+                        a = m + f
                         
                         # Find closest grid points
-                        d_idx = min(self.find_nearest_index(self.d_grid, d_est), self.n_d - 1)
-                        l_idx = min(self.find_nearest_index(self.l_grid, l_est), self.n_l - 1)
+                        a_idx = min(find_nearest_index(self.a_grid, a), self.n_a - 1)
+                        d_idx = min(find_nearest_index(self.d_grid, d_est), self.n_d - 1)
+                        l_idx = min(find_nearest_index(self.l_grid, l_est), self.n_l - 1)
                         
                         # Map to V
-                        self.V[a_idx, m_idx, z_idx, e_idx] = self.W[a_idx, d_idx, l_idx, z_idx, e_idx]
+                        self.V[m_idx, f_idx, z_idx, e_idx] = self.W[a_idx, d_idx, l_idx, z_idx, e_idx]
 
 
     def initialise_labor_market(self):
         """
         Initialize labor market variables and calculate steady state values.
         """
-
         # Firm production and revenue calculations
         self.Ys = self.κ_prime_inv(self.prices[0])  # Optimal production of early consumption goods
         
@@ -205,7 +229,7 @@ class LagosWrightAiyagariSolver:
     
     def utility_dm(self, y):
         """
-        Utility function for decentralized market -- paramters are different from the centralised market
+        Utility function for decentralized market -- parameters are different from the centralised market
         Generates 26% increase in consumption during preference shocks.
         """
         y = np.asarray(y)
@@ -315,13 +339,13 @@ class LagosWrightAiyagariSolver:
         kappa = self.kappa
         Rl = prices[1]
         # Get productivity-normalized value of a filled job
-        normalized_rev = self.firm_post_rev(prices=prices)
+        normalised_rev = self.firm_post_rev(prices=prices)
         
         # Compare expected cost with expected benefit (both normalised by z)
-        if kappa >= normalized_rev / Rl:
+        if kappa >= normalised_rev / Rl:
             θ = 1e-3  # Almost no vacancies if cost exceeds revenue
         else:
-            θ = self.job_fill_inv(kappa * Rl / normalized_rev)
+            θ = self.job_fill_inv(kappa * Rl / normalised_rev)
         
         # Compute job finding probability & vacancy filling probability
         λ = self.job_finding(θ)
@@ -330,7 +354,7 @@ class LagosWrightAiyagariSolver:
     
     def solve_dm_problem_vectorized(self, W_guess, prices):
         """
-        Vectorized version of the DM problem solver.
+        Vectorised version of the DM problem solver.
         :param W_guess: Initial guess for value function
         :param prices: Current prices [py, Rl, i]
         :return: Updated value function and policy functions
@@ -341,7 +365,7 @@ class LagosWrightAiyagariSolver:
         i = prices[2]
 
         # Initialize arrays - using float32 for memory efficiency if precision allows
-        shape = (self.n_a, self.n_m, self.n_z, self.n_e)
+        shape = (self.n_m, self.n_f, self.n_z, self.n_e)
         policy_y0 = np.zeros(shape, dtype=np.float32)
         policy_d0 = np.zeros(shape, dtype=np.float32)
         policy_l0 = np.zeros(shape, dtype=np.float32)
@@ -369,7 +393,7 @@ class LagosWrightAiyagariSolver:
                 income = self.wages[z_idx, e_idx]
                 # Vectorize for different asset levels
                 for f_idx, a_f in enumerate(self.f_grid):
-                    # Case 3: No preference shock (can be fully vectorized for all money levels)
+                    # Case 3: No preference shock
                     # When there's no preference shock, optimal policy is to deposit all money
                     w_noshock_values = np.zeros(self.n_m)
                     for m_idx, a_m in enumerate(self.m_grid):
@@ -380,7 +404,7 @@ class LagosWrightAiyagariSolver:
                             np.array([a - a_m]), np.array([a_m]),
                             self.a_grid, self.d_grid,
                             W_guess[:, :, 0, z_idx, e_idx]
-                        )[0]
+                        )[0]   # since all values are the same in this vector
                         # Deposit all money
                         policy_d_noshock[m_idx, f_idx, z_idx, e_idx] = a_m
                         
@@ -390,7 +414,7 @@ class LagosWrightAiyagariSolver:
                     
                     # Process each money level separately for shock cases
                     for m_idx, a_m in enumerate(self.m_grid):
-                        a = a_m + a_f
+                        a = min(a_m + a_f, self.a_max)
                         
                         # -------------------------------------------------------------------------
                         # Case 1: Preference shock + ω=0 (only money accepted)
@@ -402,7 +426,7 @@ class LagosWrightAiyagariSolver:
                         
                         w0_nb = self.interpolate_2d_vectorised(
                             a_f, d0, 
-                            self.f_grid, self.d_grid,                # a_f is the total asset
+                            self.a_grid, self.d_grid,                # a_f is the total asset
                             W_guess[:, :, 0, z_idx, e_idx]           # when money is either consumed or deposited
                         )
                         v0_nb = self.utility_dm(y0_nb) + w0_nb
@@ -411,7 +435,7 @@ class LagosWrightAiyagariSolver:
                         # Efficient borrowing constraint calculation
                         income_based_max = (a_f + income - self.c_min)/(1 + i)
                         collateral_based_max = a_f/(1 + i)
-                        effective_max_borrow = max(0, min(income_based_max, collateral_based_max))
+                        effective_max_borrow = min(income_based_max, collateral_based_max)
                         
                         # Skip borrowing calculations if no borrowing is possible
                         if effective_max_borrow > 0:
@@ -431,6 +455,7 @@ class LagosWrightAiyagariSolver:
                             max_nb_val = v0_nb[max_nb_idx]
                             max_b_val = v0_b[max_b_idx]
                             
+                            # compare all options when ω=0: borrow or not borrow
                             if max_nb_val >= max_b_val:
                                 policy_y0[m_idx, f_idx, z_idx, e_idx] = y0_nb[max_nb_idx]
                                 policy_d0[m_idx, f_idx, z_idx, e_idx] = d0[max_nb_idx]
@@ -453,7 +478,6 @@ class LagosWrightAiyagariSolver:
                         # Case 2: Preference shock + ω=1 (both assets accepted)
                         # -------------------------------------------------------------------------
                         
-                        
                         # Case 2.1: No borrowing (use precomputed grid)
                         y1_nb = y1_nb_grids[(m_idx, f_idx)]
                         d1 = a - py*y1_nb
@@ -466,7 +490,7 @@ class LagosWrightAiyagariSolver:
                         v1_nb = self.utility_dm(y1_nb) + w1_nb
                         
                         # Case 2.2: With borrowing
-                        max_borrow = max(0, (income - self.c_min)/(1 + i))
+                        max_borrow = (income - self.c_min)/(1 + i)
                         
                         # Skip borrowing calculations if no borrowing is possible
                         if max_borrow > 0:
@@ -522,9 +546,9 @@ class LagosWrightAiyagariSolver:
             'policy_d_noshock': policy_d_noshock
         }
     
-    def solve_cm_problem_vectorized(self, V_guess, prices):
+    def solve_cm_problem_vectorised(self, V_guess, prices):
         """
-        Vectorized solution for CM problem
+        Vectorised solution for CM problem
         :param V_guess: Initial guess for value function
         :param prices: Current prices [py, Rl, i]
         :return: Updated value function and policy functions
@@ -534,39 +558,25 @@ class LagosWrightAiyagariSolver:
         Rl = prices[1]
         i = prices[2]
 
-        # Initialize value and policy functions
+        # Initialise value and policy functions
         w_value = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
-        policy_ap = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
-        policy_m = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
-        
-        # Create meshgrids for potential portfolio choices
-        m_prime_grid, f_prime_grid = np.meshgrid(self.m_grid, self.f_grid, indexing='ij')
-        
-        # Precompute some portfolio costs
-        portfolio_cost = f_prime_grid / Rl + m_prime_grid / self.Rm
-        
+        policy_m = np.zeros_like(w_value)
+        policy_f = np.zeros_like(w_value)
+
         # Loop over employment status and skill types
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
                 income = self.wages[z_idx, e_idx]
                 
-                # Precompute continuation values for this (z, e) combination
-                # Create an array of shape (n_a, n_m) for continuation values
-                v_continuation = np.zeros((self.n_a, self.n_m))
-                for m_idx in range(self.n_m):
-                    for f_idx in range(self.n_f):
-                        # Expected value over employment transitions
-                        v_continuation[m_idx, f_idx] = V_guess[m_idx, f_idx, z_idx, :] @ self.P[e_idx, :]
-                
-                # Vectorize over current state (a, d, l)
+                # Vectorise over current state (a, d, l)
                 for a_idx, a in enumerate(self.a_grid):
                     for d_idx, d in enumerate(self.d_grid):
                         for l_idx, l in enumerate(self.l_grid):
-                            # Calculate total resources available
+                            # Calculate total resources available (RHS of the budget constraint)
                             total_resources = a + (1 + i) * d - (1 + i) * l + income
                             
                             # Initialize choice array
-                            w_choice = np.full((self.n_a, self.n_m), -1e5)  # Default to very negative
+                            w_choice = np.full((self.n_m, self.n_f), -1e5)  # Default to a very negative
                             
                             # Calculate continuation values for valid portfolio combinations only
                             for m_idx, m_prime in enumerate(self.m_grid):
@@ -575,7 +585,7 @@ class LagosWrightAiyagariSolver:
                                     # Calculate consumption
                                     c = total_resources - f_prime / Rl - m_prime / self.Rm
                                     
-                                    if c >= self.c_min:  # Valid consumption level
+                                    if c >= self.c_min:  # a small consumption level
                                         # Expected value over employment transitions
                                         v_cont = V_guess[m_idx, f_idx, z_idx, :] @ self.P[e_idx, :]
                                         w_choice[m_idx, f_idx] = self.utility(c) + self.beta * v_cont
@@ -586,17 +596,17 @@ class LagosWrightAiyagariSolver:
                             
                             # Store the maximum value and corresponding policies
                             w_value[a_idx, d_idx, l_idx, z_idx, e_idx] = max_val
-                            policy_ap[a_idx, d_idx, l_idx, z_idx, e_idx] = self.a_grid[max_indices[0]]
-                            policy_m[a_idx, d_idx, l_idx, z_idx, e_idx] = self.m_grid[max_indices[1]]
+                            policy_m[a_idx, d_idx, l_idx, z_idx, e_idx] = self.m_grid[max_indices[0]]
+                            policy_f[a_idx, d_idx, l_idx, z_idx, e_idx] = self.f_grid[max_indices[1]]
 
         # Return updated value function and policy functions
         return {
             'W': w_value,
-            'a_p': policy_ap,
-            'a_m': policy_m,
+            'policy_m': policy_m,
+            'policy_f': policy_f,
         }
-    
 
+    
     @staticmethod    
     def find_closest_indices(value, grid):
         """
@@ -605,7 +615,7 @@ class LagosWrightAiyagariSolver:
         Parameters:
         -----------
         value : float
-            The value to find closest indices for
+            The value to find the closest indices for
         grid : numpy.ndarray
             The grid of values
         
@@ -635,8 +645,6 @@ class LagosWrightAiyagariSolver:
         
         return lower_idx, upper_idx, lower_weight, upper_weight
 
-
-    
     def interpolate_2d_vectorised(self, x_values, y_values, x_grid, y_grid, grid_values):
         """
         Vectorized bilinear interpolation for arrays of query points
@@ -686,18 +694,6 @@ class LagosWrightAiyagariSolver:
                 v10 * (1 - wx) * wy + 
                 v01 * wx * (1 - wy) + 
                 v11 * (1 - wx) * (1 - wy))
-    
-    def find_nearest_index(self, grid, value):
-        """Find index of the nearest grid point to a given value"""
-        idx = np.abs(grid - value).argmin()
-        return idx
-    
-    def find_nearest_lower_index(self, grid, value):
-            """Find index of the nearest grid point less than or equal to a given value"""
-            indices = np.where(grid <= value)[0]
-            if len(indices) == 0:
-                return 0
-            return indices[-1]
 
     def solver_iteration(self, prices, W_guess=None):
         """
@@ -718,13 +714,17 @@ class LagosWrightAiyagariSolver:
         V = dm_results['V_dm']
         
         # Step 2: Solve CM problem to get updated W
-        cm_results = self.solve_cm_problem_vectorized(V, prices)
+        cm_results = self.solve_cm_problem_vectorised(V, prices)
         W_updated = cm_results['W']
         
         # Calculate convergence metrics
         diff = np.abs(W_updated - W_guess)
         max_diff = np.max(diff)
         mean_diff = np.mean(diff)
+        
+        # Store current value functions for history
+        self.value_history['W'].append(W_updated.copy())
+        self.value_history['V'].append(V.copy())
         
         return {
             'W': W_updated,
@@ -736,13 +736,14 @@ class LagosWrightAiyagariSolver:
             'converged': max_diff < self.tol
         }
 
-    def solve_model(self, prices=None, plot_frequency=10):
+    def solve_model(self, prices=None, plot_frequency=10, export_frequency=20):
         """
         Solve the model by iterating until convergence or max iterations reached.
         Plots value and policy functions periodically during iteration.
         
         :param prices: Custom prices [py, Rl, i], uses self.prices if None
         :param plot_frequency: How often to plot (every N iterations)
+        :param export_frequency: How often to export value functions (every N iterations)
         :return: Solution dictionary with value functions, policy functions, and convergence info
         """
         if prices is None:
@@ -753,6 +754,10 @@ class LagosWrightAiyagariSolver:
         iteration = 0
         converged = False
         start_time = time.time()
+        
+        # Create directory for exports if it doesn't exist
+        if not os.path.exists('exports'):
+            os.makedirs('exports')
         
         # Store convergence history
         history = {
@@ -788,6 +793,10 @@ class LagosWrightAiyagariSolver:
             # Plot current value and policy functions
             if iteration % plot_frequency == 0 or converged:
                 self.plot_functions(iteration, results)
+            
+            # Export value functions to Excel
+            if iteration % export_frequency == 0 or converged:
+                self.export_value_functions(iteration)
         
         # Final results
         total_time = time.time() - start_time
@@ -800,6 +809,9 @@ class LagosWrightAiyagariSolver:
         # Store final value functions
         self.W = W_current
         self.V = results['V']
+        
+        # Export final value functions
+        self.export_value_functions(iteration, final=True)
         
         # Return complete solution
         return {
@@ -815,7 +827,7 @@ class LagosWrightAiyagariSolver:
 
     def plot_functions(self, iteration, results):
         """
-        Plot value functions and policy functions along the asset dimension,
+        Plot value functions and policy functions along money and illiquid asset dimensions,
         separated by employment status and skill types.
         
         :param iteration: Current iteration number
@@ -831,81 +843,267 @@ class LagosWrightAiyagariSolver:
         dm_results = results['dm_results']
         cm_results = results['cm_results']
         
-        # Set up figure with subplots
-        fig, axes = plt.subplots(3, 2, figsize=(12, 14))
-        fig.suptitle(f'Iteration {iteration}', fontsize=16)
+        # 1. Value Function Plots
+        # -----------------------
         
-        # Plot value functions across asset dimension for different skill and employment types
+        # Plot V as a function of money holdings for different illiquid asset levels
+        fig, axes = plt.subplots(self.n_z, self.n_e, figsize=(12, 14))
+        fig.suptitle(f'Value Function V (Iteration {iteration})', fontsize=16)
+        
         for z_idx in range(self.n_z):
             for e_idx in range(self.n_e):
-                row = z_idx
-                col = e_idx
+                # Select a few illiquid asset levels to plot
+                f_indices = [0, self.n_f//4, self.n_f//2, 3*self.n_f//4, self.n_f-1]
                 
-                # Check if we have enough subplot axes
-                if row < axes.shape[0] and col < axes.shape[1]:
-                    # Select a middle money/deposit/loan index
-                    m_idx = self.n_m // 2
-                    d_idx = self.n_d // 2
-                    l_idx = self.n_l // 2
-                    
-                    # Plot value functions
-                    axes[row, col].plot(self.a_grid, V[:, m_idx, z_idx, e_idx], 
-                                        label=f'V (m={self.m_grid[m_idx]:.2f})')
-                    axes[row, col].plot(self.a_grid, W[:, d_idx, l_idx, z_idx, e_idx], 
-                                        label=f'W (d={self.d_grid[d_idx]:.2f}, l={self.l_grid[l_idx]:.2f})')
-                    
-                    # Label plot
-                    employment_label = 'Employed' if e_idx == 1 else 'Unemployed'
-                    skill_label = f'z={self.z_grid[z_idx]:.2f}'
-                    axes[row, col].set_title(f'{skill_label}, {employment_label}')
-                    axes[row, col].set_xlabel('Assets (a)')
-                    axes[row, col].set_ylabel('Value')
-                    axes[row, col].legend()
-                    axes[row, col].grid(True)
+                for f_idx in f_indices:
+                    f_val = self.f_grid[f_idx]
+                    axes[z_idx, e_idx].plot(self.m_grid, V[:, f_idx, z_idx, e_idx], 
+                                           label=f'f={f_val:.2f}')
+                
+                # Label plot
+                employment_label = 'Employed' if e_idx == 1 else 'Unemployed'
+                skill_label = f'z={self.z_grid[z_idx]:.2f}'
+                axes[z_idx, e_idx].set_title(f'{skill_label}, {employment_label}')
+                axes[z_idx, e_idx].set_xlabel('Money Holdings (m)')
+                axes[z_idx, e_idx].set_ylabel('Value')
+                axes[z_idx, e_idx].legend()
+                axes[z_idx, e_idx].grid(True)
         
-        # Save figure
-        plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust for suptitle
-        plt.savefig(f'plots/value_functions_iter_{iteration}.png')
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig(f'plots/value_function_V_m_iter_{iteration}.png')
         plt.close()
         
-        # Create another figure for policy functions
-        fig, axes = plt.subplots(3, 2, figsize=(12, 14))
-        fig.suptitle(f'Policy Functions - Iteration {iteration}', fontsize=16)
+        # Plot V as a function of illiquid assets for different money levels
+        fig, axes = plt.subplots(self.n_z, self.n_e, figsize=(12, 14))
+        fig.suptitle(f'Value Function V (Iteration {iteration})', fontsize=16)
         
-        # Plot policy functions for asset accumulation across employment status
-        for z_idx in range(min(self.n_z, axes.shape[0])):
-            # Get policy functions for asset accumulation (a')
-            # Average across deposit and loan dimensions
-            a_prime_employed = np.mean(cm_results['a_p'][:, :, :, z_idx, 1], axis=(1, 2))
-            a_prime_unemployed = np.mean(cm_results['a_p'][:, :, :, z_idx, 0], axis=(1, 2))
-            
-            # Plot asset accumulation policies
-            axes[z_idx, 0].plot(self.a_grid, self.a_grid, 'k--', label='45° line')
-            axes[z_idx, 0].plot(self.a_grid, a_prime_employed, label='Employed')
-            axes[z_idx, 0].plot(self.a_grid, a_prime_unemployed, label='Unemployed')
-            axes[z_idx, 0].set_title(f'Asset Accumulation (z={self.z_grid[z_idx]:.2f})')
-            axes[z_idx, 0].set_xlabel('Current Assets (a)')
-            axes[z_idx, 0].set_ylabel('Next Period Assets (a\')')
-            axes[z_idx, 0].legend()
-            axes[z_idx, 0].grid(True)
-            
-            # Plot money holdings policy
-            m_prime_employed = np.mean(cm_results['a_m'][:, :, :, z_idx, 1], axis=(1, 2))
-            m_prime_unemployed = np.mean(cm_results['a_m'][:, :, :, z_idx, 0], axis=(1, 2))
-            
-            axes[z_idx, 1].plot(self.a_grid, m_prime_employed, label='Employed')
-            axes[z_idx, 1].plot(self.a_grid, m_prime_unemployed, label='Unemployed')
-            axes[z_idx, 1].set_title(f'Money Holdings (z={self.z_grid[z_idx]:.2f})')
-            axes[z_idx, 1].set_xlabel('Current Assets (a)')
-            axes[z_idx, 1].set_ylabel('Money Holdings (m\')')
-            axes[z_idx, 1].legend()
-            axes[z_idx, 1].grid(True)
+        for z_idx in range(self.n_z):
+            for e_idx in range(self.n_e):
+                # Select a few money levels to plot
+                m_indices = [0, self.n_m//4, self.n_m//2, 3*self.n_m//4, self.n_m-1]
+                
+                for m_idx in m_indices:
+                    m_val = self.m_grid[m_idx]
+                    axes[z_idx, e_idx].plot(self.f_grid, V[m_idx, :, z_idx, e_idx], 
+                                           label=f'm={m_val:.2f}')
+                
+                # Label plot
+                employment_label = 'Employed' if e_idx == 1 else 'Unemployed'
+                skill_label = f'z={self.z_grid[z_idx]:.2f}'
+                axes[z_idx, e_idx].set_title(f'{skill_label}, {employment_label}')
+                axes[z_idx, e_idx].set_xlabel('Illiquid Assets (f)')
+                axes[z_idx, e_idx].set_ylabel('Value')
+                axes[z_idx, e_idx].legend()
+                axes[z_idx, e_idx].grid(True)
         
-        # Save policy functions figure
-        plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust for suptitle
-        plt.savefig(f'plots/policy_functions_iter_{iteration}.png')
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig(f'plots/value_function_V_f_iter_{iteration}.png')
         plt.close()
+        
+        # 2. Policy Function Plots
+        # ------------------------
+        
+        # Plot money holdings policy for middle skill type
+        z_idx = self.n_z // 2
+        
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(f'Money Policy Function (z={self.z_grid[z_idx]:.2f}, Iteration {iteration})', fontsize=16)
+        
+        # Get slice of policy function for specific deposit and loan values
+        d_idx = self.n_d // 2
+        l_idx = 0  # No loans
+        
+        # For employed
+        for f_idx in [0, self.n_f//4, self.n_f//2, 3*self.n_f//4, self.n_f-1]:
+            f_val = self.f_grid[f_idx]
+            axes[0].plot(self.m_grid, cm_results['policy_m'][:, d_idx, l_idx, z_idx, 1],
+                        label=f'f={f_val:.2f}')
+        
+        axes[0].plot(self.m_grid, self.m_grid, 'k--', label='45° line')
+        axes[0].set_title('Employed')
+        axes[0].set_xlabel('Current Money (m)')
+        axes[0].set_ylabel('Next Period Money (m\')')
+        axes[0].legend()
+        axes[0].grid(True)
+        
+        # For unemployed
+        for f_idx in [0, self.n_f//4, self.n_f//2, 3*self.n_f//4, self.n_f-1]:
+            f_val = self.f_grid[f_idx]
+            axes[1].plot(self.m_grid, cm_results['policy_m'][:, d_idx, l_idx, z_idx, 0],
+                        label=f'f={f_val:.2f}')
+        
+        axes[1].plot(self.m_grid, self.m_grid, 'k--', label='45° line')
+        axes[1].set_title('Unemployed')
+        axes[1].set_xlabel('Current Money (m)')
+        axes[1].set_ylabel('Next Period Money (m\')')
+        axes[1].legend()
+        axes[1].grid(True)
+        
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig(f'plots/policy_money_iter_{iteration}.png')
+        plt.close()
+        
+        # Plot illiquid asset policy for middle skill type
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(f'Illiquid Asset Policy Function (z={self.z_grid[z_idx]:.2f}, Iteration {iteration})', fontsize=16)
+        
+        # For employed
+        for m_idx in [0, self.n_m//4, self.n_m//2, 3*self.n_m//4, self.n_m-1]:
+            m_val = self.m_grid[m_idx]
+            axes[0].plot(self.f_grid, cm_results['policy_f'][:, d_idx, l_idx, z_idx, 1],
+                        label=f'm={m_val:.2f}')
+        
+        axes[0].plot(self.f_grid, self.f_grid, 'k--', label='45° line')
+        axes[0].set_title('Employed')
+        axes[0].set_xlabel('Current Illiquid Assets (f)')
+        axes[0].set_ylabel('Next Period Illiquid Assets (f\')')
+        axes[0].legend()
+        axes[0].grid(True)
+        
+        # For unemployed
+        for m_idx in [0, self.n_m//4, self.n_m//2, 3*self.n_m//4, self.n_m-1]:
+            m_val = self.m_grid[m_idx]
+            axes[1].plot(self.f_grid, cm_results['policy_f'][:, d_idx, l_idx, z_idx, 0],
+                        label=f'm={m_val:.2f}')
+        
+        axes[1].plot(self.f_grid, self.f_grid, 'k--', label='45° line')
+        axes[1].set_title('Unemployed')
+        axes[1].set_xlabel('Current Illiquid Assets (f)')
+        axes[1].set_ylabel('Next Period Illiquid Assets (f\')')
+        axes[1].legend()
+        axes[1].grid(True)
+        
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig(f'plots/policy_illiquid_iter_{iteration}.png')
+        plt.close()
+        
+        # 3. Portfolio Composition Plots
+        # ------------------------------
+        
+        # Plot money ratio m/(m+f) for middle skill type
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig.suptitle(f'Portfolio Composition (z={self.z_grid[z_idx]:.2f}, Iteration {iteration})', fontsize=16)
+        
+        # Compute portfolio compositions
+        for f_idx in [0, self.n_f//4, self.n_f//2, 3*self.n_f//4, self.n_f-1]:
+            f_val = self.f_grid[f_idx]
+            
+            # For employed
+            m_next = cm_results['policy_m'][:, d_idx, l_idx, z_idx, 1]
+            f_next = cm_results['policy_f'][:, d_idx, l_idx, z_idx, 1]
+            ratio = np.divide(m_next, m_next + f_next, out=np.zeros_like(m_next), where=(m_next + f_next) > 0)
+            
+            axes[0].plot(self.m_grid, ratio, label=f'f={f_val:.2f}')
+            
+            # For unemployed
+            m_next = cm_results['policy_m'][:, d_idx, l_idx, z_idx, 0]
+            f_next = cm_results['policy_f'][:, d_idx, l_idx, z_idx, 0]
+            ratio = np.divide(m_next, m_next + f_next, out=np.zeros_like(m_next), where=(m_next + f_next) > 0)
+            
+            axes[1].plot(self.m_grid, ratio, label=f'f={f_val:.2f}')
+        
+        axes[0].set_title('Employed')
+        axes[0].set_xlabel('Current Money (m)')
+        axes[0].set_ylabel('Money Ratio m\'/(m\'+f\')')
+        axes[0].set_ylim(0, 1)
+        axes[0].legend()
+        axes[0].grid(True)
+        
+        axes[1].set_title('Unemployed')
+        axes[1].set_xlabel('Current Money (m)')
+        axes[1].set_ylabel('Money Ratio m\'/(m\'+f\')')
+        axes[1].set_ylim(0, 1)
+        axes[1].legend()
+        axes[1].grid(True)
+        
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig(f'plots/portfolio_composition_iter_{iteration}.png')
+        plt.close()
+    
+    def export_value_functions(self, iteration, final=False):
+        """
+        Export value functions to Excel files
+        
+        :param iteration: Current iteration number
+        :param final: Whether this is the final iteration
+        """
+        # Create directories if they don't exist
+        if not os.path.exists('exports'):
+            os.makedirs('exports')
+        
+        prefix = 'final' if final else f'iter_{iteration}'
+        
+        # Export V function
+        V = self.V
+        
+        # Create multi-index DataFrame for V
+        idx = pd.MultiIndex.from_product([
+            self.m_grid, self.f_grid, self.z_grid, ['Unemployed', 'Employed']
+        ], names=['Money', 'Illiquid', 'Skill', 'Employment'])
+        
+        # Reshape V for DataFrame
+        V_flat = V.reshape(-1)
+        df_V = pd.DataFrame({'Value': V_flat}, index=idx)
+        
+        # Export to Excel
+        df_V.to_excel(f'exports/V_{prefix}.xlsx')
+        
+        # Export W function (for select combinations to manage file size)
+        W = self.W
+        
+        # Select a subset of deposit/loan indices
+        d_indices = [0, self.n_d//2, self.n_d-1]
+        l_indices = [0, self.n_l//2, self.n_l-1]
+        
+        for d_idx in d_indices:
+            for l_idx in l_indices:
+                d_val = self.d_grid[d_idx]
+                l_val = self.l_grid[l_idx]
+                
+                # Create multi-index DataFrame for this W slice
+                idx = pd.MultiIndex.from_product([
+                    self.m_grid, self.f_grid, self.z_grid, ['Unemployed', 'Employed']
+                ], names=['Money', 'Illiquid', 'Skill', 'Employment'])
+                
+                # Extract slice and reshape
+                W_slice = W[:, :, d_idx, l_idx, :, :]
+                W_flat = W_slice.reshape(-1)
+                
+                df_W = pd.DataFrame({'Value': W_flat}, index=idx)
+                
+                # Export to Excel
+                df_W.to_excel(f'exports/W_{prefix}_d{d_val:.2f}_l{l_val:.2f}.xlsx')
+        
+        # If we're storing value function history, export the latest entry
+        if hasattr(self, 'value_history') and len(self.value_history['V']) > 0:
+            # Get latest stored V
+            hist_idx = len(self.value_history['V']) - 1
+            V_hist = self.value_history['V'][hist_idx]
+            
+            # Reshape and export
+            V_hist_flat = V_hist.reshape(-1)
+            df_V_hist = pd.DataFrame({'Value': V_hist_flat}, index=idx)
+            df_V_hist.to_excel(f'exports/V_history_{hist_idx}.xlsx')
 
+def main():
+    # Parameter definitions
+    params = {
+        # ...existing params...
+    }
+    
+    # Initialize solver
+    solver = LagosWrightAiyagariSolver(params)
+    
+    # Set baseline prices and solve
+    baseline_prices = np.array([
+        params['py'],
+        params['Rl'],
+        params['i']
+    ])
+    
+    # Solve model
+    solution = solver.solve_model(prices=baseline_prices)
+    return solution
 
     
 if __name__ == "__main__":
@@ -930,22 +1128,22 @@ if __name__ == "__main__":
         'c_min': 1e-2,    # minimum consumption
         
         # Grid specifications
-        'n_a': 50,       # Number of asset grid points
+        'n_a': 3,       # Number of asset grid points (for testing)
         'n_m': 20,        # Number of money grid points
-        'n_f': 20,       # Number of illiquid asset grid points
+        'n_f': 20,        # Number of illiquid asset grid points
         'n_d': 20,        # Number of deposit grid points
-        'n_l': 25,        # Number of loan grid points
-        'a_min': 0.0,     # Minimum asset value
-        'a_max': 20.0,    # Maximum asset value
+        'n_l': 20,        # Number of loan grid points
+        'a_min': 0.0,     # Minimum asset holdings
+        'a_max': 20.0,    # Maximum asset holdings
         'm_min': 0.0,     # Minimum money holdings
         'm_max': 10.0,    # Maximum money holdings
         'f_min': 0.0,     # Minimum illiquid holdings
         'f_max': 10.0,    # Maximum illiquid holdings
         'l_min': 0,       # Minimum loan value
-        'l_max': 15.0,    # Maximum loan value
+        'l_max': 10.0,    # Maximum loan value
         'd_min': 0,       # Minimum deposit value
-        'd_max': 15.0,    # Maximum deposit value
-        'ny': 100,        # Number of grid points for DM goods
+        'd_max': 10.0,    # Maximum deposit value
+        'ny': 40,        # Number of grid points for DM goods
         
         # Price parameters
         'py': 1.0,        # Price of DM goods
@@ -982,7 +1180,7 @@ if __name__ == "__main__":
     
     # Solve the model
     print("\nSolving model...")
-    solution = solver.solve_model(prices=baseline_prices, plot_frequency=5)
+    solution = solver.solve_model(prices=baseline_prices, plot_frequency=10, export_frequency=20)
     
     # Print results
     print("\nSolution results:")
@@ -1005,4 +1203,4 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.savefig('plots/convergence_history.png')
     
-    print("\nAnalysis complete. Check the 'plots' directory for visualizations.")
+    print("\nAnalysis complete. Check the 'plots' and 'exports' directories for visualizations and data.")
