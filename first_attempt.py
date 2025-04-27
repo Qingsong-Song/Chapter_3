@@ -1128,7 +1128,7 @@ if __name__ == "__main__":
         'c_min': 1e-2,    # minimum consumption
         
         # Grid specifications
-        'n_a': 3,       # Number of asset grid points (for testing)
+        'n_a': 20,       # Number of asset grid points (for testing)
         'n_m': 20,        # Number of money grid points
         'n_f': 20,        # Number of illiquid asset grid points
         'n_d': 20,        # Number of deposit grid points
