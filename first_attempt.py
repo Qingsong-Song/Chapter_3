@@ -1066,7 +1066,7 @@ class LagosWrightAiyagariSolver:
                 ], names=['Money', 'Illiquid', 'Skill', 'Employment'])
                 
                 # Extract slice and reshape
-                W_slice = W[:, :, d_idx, l_idx, :, :]
+                W_slice = W[:, d_idx, l_idx, :, :]
                 W_flat = W_slice.reshape(-1)
                 
                 df_W = pd.DataFrame({'Value': W_flat}, index=idx)
