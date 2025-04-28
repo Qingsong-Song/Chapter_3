@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 import os
 import time
 import pandas as pd
-import sys
 
 
 def find_nearest_index(grid, value):
@@ -794,9 +793,7 @@ class LagosWrightAiyagariSolver:
             if iteration % plot_frequency == 0 or converged:
                 self.plot_functions(iteration, results)
             
-            # Export value functions to Excel
-            if iteration % export_frequency == 0 or converged:
-                self.export_value_functions(iteration)
+
         
         # Final results
         total_time = time.time() - start_time
@@ -810,8 +807,6 @@ class LagosWrightAiyagariSolver:
         self.W = W_current
         self.V = results['V']
         
-        # Export final value functions
-        self.export_value_functions(iteration, final=True)
         
         # Return complete solution
         return {
@@ -1020,187 +1015,101 @@ class LagosWrightAiyagariSolver:
         plt.savefig(f'plots/portfolio_composition_iter_{iteration}.png')
         plt.close()
     
-    def export_value_functions(self, iteration, final=False):
-        """
-        Export value functions to Excel files
-        
-        :param iteration: Current iteration number
-        :param final: Whether this is the final iteration
-        """
-        # Create directories if they don't exist
-        if not os.path.exists('exports'):
-            os.makedirs('exports')
-        
-        prefix = 'final' if final else f'iter_{iteration}'
-        
-        # Export V function
-        V = self.V
-        
-        # Create multi-index DataFrame for V
-        idx = pd.MultiIndex.from_product([
-            self.m_grid, self.f_grid, self.z_grid, ['Unemployed', 'Employed']
-        ], names=['Money', 'Illiquid', 'Skill', 'Employment'])
-        
-        # Reshape V for DataFrame
-        V_flat = V.reshape(-1)
-        df_V = pd.DataFrame({'Value': V_flat}, index=idx)
-        
-        # Export to Excel
-        df_V.to_excel(f'exports/V_{prefix}.xlsx')
-        
-        # Export W function (for select combinations to manage file size)
-        W = self.W
-        
-        # Select a subset of deposit/loan indices
-        d_indices = [0, self.n_d//2, self.n_d-1]
-        l_indices = [0, self.n_l//2, self.n_l-1]
-        
-        for d_idx in d_indices:
-            for l_idx in l_indices:
-                d_val = self.d_grid[d_idx]
-                l_val = self.l_grid[l_idx]
-                
-                # Create multi-index DataFrame for this W slice
-                idx = pd.MultiIndex.from_product([
-                    self.m_grid, self.f_grid, self.z_grid, ['Unemployed', 'Employed']
-                ], names=['Money', 'Illiquid', 'Skill', 'Employment'])
-                
-                # Extract slice and reshape
-                W_slice = W[:, d_idx, l_idx, :, :]
-                W_flat = W_slice.reshape(-1)
-                
-                df_W = pd.DataFrame({'Value': W_flat}, index=idx)
-                
-                # Export to Excel
-                df_W.to_excel(f'exports/W_{prefix}_d{d_val:.2f}_l{l_val:.2f}.xlsx')
-        
-        # If we're storing value function history, export the latest entry
-        if hasattr(self, 'value_history') and len(self.value_history['V']) > 0:
-            # Get latest stored V
-            hist_idx = len(self.value_history['V']) - 1
-            V_hist = self.value_history['V'][hist_idx]
-            
-            # Reshape and export
-            V_hist_flat = V_hist.reshape(-1)
-            df_V_hist = pd.DataFrame({'Value': V_hist_flat}, index=idx)
-            df_V_hist.to_excel(f'exports/V_history_{hist_idx}.xlsx')
 
-def main():
-    # Parameter definitions
-    params = {
-        # ...existing params...
-    }
-    
-    # Initialize solver
-    solver = LagosWrightAiyagariSolver(params)
-    
-    # Set baseline prices and solve
-    baseline_prices = np.array([
-        params['py'],
-        params['Rl'],
-        params['i']
-    ])
-    
-    # Solve model
-    solution = solver.solve_model(prices=baseline_prices)
-    return solution
-
-    
-if __name__ == "__main__":
-    params = {
+params = {
         # Preference parameters
         'beta': 0.96,      # Discount factor
         'alpha': 0.075,    # Probability of DM consumption opportunity
         'alpha_1': 0.06,   # Probability of accepting both money and assets
         'gamma': 1.5,      # Risk aversion parameter
-        'Psi': 2.2,       # DM utility scaling parameter
+        'Psi': 2.2,        # DM utility scaling parameter
         
         # Production and labor market parameters
-        'psi': 0.28,      # Matching function elasticity
-        'zeta': 0.75,     # Worker bargaining power
-        'nu': 1.6,        # Labor supply elasticity
-        'mu': 0.7,        # Matching efficiency
-        'delta': 0.035,   # Job separation rate
-        'kappa': 7.29,    # Vacancy posting cost
-        'repl_rate': 0.4, # Unemployment benefit replacement rate
+        'psi': 0.28,       # Matching function elasticity
+        'zeta': 0.75,      # Worker bargaining power
+        'nu': 1.6,         # Labor supply elasticity
+        'mu': 0.7,         # Matching efficiency
+        'delta': 0.035,    # Job separation rate
+        'kappa': 7.29,     # Vacancy posting cost
+        'repl_rate': 0.4,  # Unemployment benefit replacement rate
 
         # DM parameters
-        'c_min': 1e-2,    # minimum consumption
+        'c_min': 1e-2,     # minimum consumption
         
         # Grid specifications
-        'n_a': 20,       # Number of asset grid points (for testing)
-        'n_m': 20,        # Number of money grid points
-        'n_f': 20,        # Number of illiquid asset grid points
-        'n_d': 20,        # Number of deposit grid points
-        'n_l': 20,        # Number of loan grid points
-        'a_min': 0.0,     # Minimum asset holdings
-        'a_max': 20.0,    # Maximum asset holdings
-        'm_min': 0.0,     # Minimum money holdings
-        'm_max': 10.0,    # Maximum money holdings
-        'f_min': 0.0,     # Minimum illiquid holdings
-        'f_max': 10.0,    # Maximum illiquid holdings
-        'l_min': 0,       # Minimum loan value
-        'l_max': 10.0,    # Maximum loan value
-        'd_min': 0,       # Minimum deposit value
-        'd_max': 10.0,    # Maximum deposit value
-        'ny': 40,        # Number of grid points for DM goods
+        'n_a': 10,         # Number of asset grid points (for testing)
+        'n_m': 10,         # Number of money grid points
+        'n_f': 10,         # Number of illiquid asset grid points
+        'n_d': 10,         # Number of deposit grid points
+        'n_l': 10,         # Number of loan grid points
+        'a_min': 0.0,      # Minimum asset holdings
+        'a_max': 20.0,     # Maximum asset holdings
+        'm_min': 0.0,      # Minimum money holdings
+        'm_max': 10.0,     # Maximum money holdings
+        'f_min': 0.0,      # Minimum illiquid holdings
+        'f_max': 10.0,     # Maximum illiquid holdings
+        'l_min': 0,        # Minimum loan value
+        'l_max': 10.0,     # Maximum loan value
+        'd_min': 0,        # Minimum deposit value
+        'd_max': 10.0,     # Maximum deposit value
+        'ny': 20,          # Number of grid points for DM goods
         
         # Price parameters
-        'py': 1.0,        # Price of DM goods
-        'Rl': 1.03,       # Return on illiquid assets
-        'i': 0.02,        # Nominal interest rate
+        'py': 1.0,         # Price of DM goods
+        'Rl': 1.03,        # Return on illiquid assets
+        'i': 0.02,         # Nominal interest rate
         'Rm': (1.0-0.014)**(1.0/12.0),   # Gross return of real money balances (exogenous)
 
         # Government Spending
-        'Ag0': 0.1,       # Exogenous government spending 
+        'Ag0': 0.1,        # Exogenous government spending 
 
         # Convergence parameters
         'max_iter': 100,   # Maximum number of iterations
-        'tol': 1e-5       # Convergence tolerance
+        'tol': 1e-5        # Convergence tolerance
     }
 
-    # Initialize solver with parameters
-    print("Initializing LagosWrightAiyagariSolver...")
-    solver = LagosWrightAiyagariSolver(params)
-    
-    # Set baseline prices
-    baseline_prices = np.array([
-        params['py'],      # Price of DM goods
-        params['Rl'],      # Return on illiquid assets
-        params['i']        # Nominal interest rate
-    ])
-    
-    # Print initial conditions
-    print("\nInitial conditions:")
-    print(f"  Labor market tightness: {solver.market_tightness:.4f}")
-    print(f"  Job finding probability: {solver.job_finding_prob:.4f}")
-    print(f"  Employment rate: {solver.emp_rate:.4f}")
-    print(f"  Wages (employed, z=1): {solver.wages[1, 1]:.4f}")
-    print(f"  Wages (unemployed, z=1): {solver.wages[1, 0]:.4f}")
-    
-    # Solve the model
-    print("\nSolving model...")
-    solution = solver.solve_model(prices=baseline_prices, plot_frequency=10, export_frequency=20)
-    
-    # Print results
-    print("\nSolution results:")
-    print(f"  Converged: {solution['converged']}")
-    print(f"  Iterations: {solution['iterations']}")
-    print(f"  Total time: {solution['total_time']:.2f} seconds")
-    print(f"  Final max diff: {solution['history']['max_diff'][-1]:.6e}")
-    
-    # Plot convergence history
-    plt.figure(figsize=(10, 6))
-    plt.semilogy(range(1, len(solution['history']['max_diff'])+1), 
-                solution['history']['max_diff'], 'b-', label='Max Diff')
-    plt.semilogy(range(1, len(solution['history']['mean_diff'])+1), 
-                solution['history']['mean_diff'], 'r--', label='Mean Diff')
-    plt.axhline(y=params['tol'], color='k', linestyle=':', label='Tolerance')
-    plt.xlabel('Iteration')
-    plt.ylabel('Value Function Difference (log scale)')
-    plt.title('Convergence History')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig('plots/convergence_history.png')
-    
-    print("\nAnalysis complete. Check the 'plots' and 'exports' directories for visualizations and data.")
+# Initialize solver with parameters
+print("Initializing LagosWrightAiyagariSolver...")
+solver = LagosWrightAiyagariSolver(params)
+
+# Set baseline prices
+baseline_prices = np.array([
+    params['py'],      # Price of DM goods
+    params['Rl'],      # Return on illiquid assets
+    params['i']        # Nominal interest rate
+])
+
+# Print initial conditions
+print("\nInitial conditions:")
+print(f"  Labor market tightness: {solver.market_tightness:.4f}")
+print(f"  Job finding probability: {solver.job_finding_prob:.4f}")
+print(f"  Employment rate: {solver.emp_rate:.4f}")
+print(f"  Wages (employed, z=1): {solver.wages[1, 1]:.4f}")
+print(f"  Wages (unemployed, z=1): {solver.wages[1, 0]:.4f}")
+
+# Solve the model
+print("\nSolving model...")
+solution = solver.solve_model(prices=baseline_prices, plot_frequency=10, export_frequency=20)
+
+# Print results
+print("\nSolution results:")
+print(f"  Converged: {solution['converged']}")
+print(f"  Iterations: {solution['iterations']}")
+print(f"  Total time: {solution['total_time']:.2f} seconds")
+print(f"  Final max diff: {solution['history']['max_diff'][-1]:.6e}")
+
+# Plot convergence history
+plt.figure(figsize=(10, 6))
+plt.semilogy(range(1, len(solution['history']['max_diff'])+1), 
+            solution['history']['max_diff'], 'b-', label='Max Diff')
+plt.semilogy(range(1, len(solution['history']['mean_diff'])+1), 
+            solution['history']['mean_diff'], 'r--', label='Mean Diff')
+plt.axhline(y=params['tol'], color='k', linestyle=':', label='Tolerance')
+plt.xlabel('Iteration')
+plt.ylabel('Value Function Difference (log scale)')
+plt.title('Convergence History')
+plt.legend()
+plt.grid(True)
+plt.savefig('plots/convergence_history.png')
+
+print("\nAnalysis complete. Check the 'plots' and 'exports' directories for visualizations and data.")
