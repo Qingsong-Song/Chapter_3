@@ -1064,7 +1064,7 @@ params = {
         'Ag0': 0.1,        # Exogenous government spending 
 
         # Convergence parameters
-        'max_iter': 100,   # Maximum number of iterations
+        'max_iter': 1000,   # Maximum number of iterations
         'tol': 1e-5        # Convergence tolerance
     }
 
