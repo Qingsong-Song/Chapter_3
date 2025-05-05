@@ -162,7 +162,7 @@ class LagosWrightAiyagariSolver:
 
     def initialise_labor_market(self):
         """
-        Initialize labor market variables and calculate steady state values.
+        Initialise labor market variables and calculate steady state values.
         """
         # Firm production and revenue calculations
         self.Ys = self.κ_prime_inv(self.prices[0])  # Optimal production of early consumption goods
@@ -187,20 +187,9 @@ class LagosWrightAiyagariSolver:
         # Firm profits and value
         profits = self.frev - self.wages_bar[:, 1]
         self.Js = profits / (1.0 - ((1.0 - self.delta) / self.prices[1]))
-        
-        # Calculate steady state tightness and employment rate
-        # First check if the free-entry condition can be satisfied
-        entry_condition_max = np.max((self.z_grid * self.kappa * self.prices[1]) / self.Js)
-        
-        if entry_condition_max < 1:
-            # Use the first productivity type to determine tightness (should be the same for all z)
-            self.market_tightness = self.job_fill_inv((self.z_grid[0] * self.kappa * self.prices[1]) / self.Js[0])
-        else:
-            # If entry condition can't be satisfied, set very low tightness
-            self.market_tightness = 0.0001
-        
-        # Calculate job finding probability and employment rate
-        self.job_finding_prob = self.job_finding(self.market_tightness)
+
+        # solve_θ
+        self.market_tightness, self.job_finding_prob, self.job_finding_fill = self.solve_θ(self.prices)
         self.emp_rate = self.job_finding_prob / (self.delta + self.job_finding_prob)
         
         # Employment transition matrix: rows = current state, cols = next state
@@ -238,7 +227,7 @@ class LagosWrightAiyagariSolver:
     
     def κ_prime_inv(self, py):
         """
-        Solve the firm's optimal early consumption goods production, given early consumption price.
+        Solve the firm's optimal production y (skill-z adjusted), given goods price.
         Assumed: q_bar = y_bar = 1
         :param py:
         :return: the optimal supply of early consumption goods
@@ -250,7 +239,7 @@ class LagosWrightAiyagariSolver:
     def κ_fun(self, y):
         """
         κ(y) = q̄ - Q(y), where Q is a PPF and q̄ == 1.
-        Opportunity cost of producing y.
+        Opportunity cost of producing y (skill-z adjusted).
         :param y: a vector of early consumption.
         :return:
         """
@@ -270,23 +259,23 @@ class LagosWrightAiyagariSolver:
 
     def firm_post_rev(self, prices):
         """
-        Calculates the productivity-normalized value of a filled job.
+        Calculates the productivity-normalised value of a filled job.
         This represents the value per unit of worker productivity (z).
-        Both revenue and costs scale with z, so we normalize by z to get 
+        Both revenue and costs scale with z, so we normalise by z to get 
         a single market tightness for all productivity types.
         
         Derived from Eq (13): ϕᶠ(z) = zq(pʸ) - zw₁ + (1-δ)ϕᶠ(z)/Rⁱ
-        When normalized by z: ϕ̃ᶠ = ϕᶠ(z)/z = q(pʸ) - w₁ + (1-δ)ϕ̃ᶠ/Rⁱ
+        When normalised by z: ϕ̃ᶠ = ϕᶠ(z)/z = q(pʸ) - w₁ + (1-δ)ϕ̃ᶠ/Rⁱ
         
         Returns:
-            normalized_rev: The value per unit of productivity (independent of z)
+            normalised_rev: The value per unit of productivity (independent of z)
         """
         py = prices[0]
         Rl = prices[1]
 
         q = self.q_fun(py)
-        normalized_rev = (1 - self.mu) * q / (1 - (1 - self.delta) / Rl)
-        return normalized_rev
+        normalised_rev = (1 - self.mu) * q / (1 - (1 - self.delta) / Rl)
+        return normalised_rev
     
     def job_finding(self, θ):
         """
@@ -294,7 +283,7 @@ class LagosWrightAiyagariSolver:
         :param θ: tightness in the labor market:  job vacancy / seekers
         :return: vacancy filling rate between 0 and 1.
         """
-        prob = 1 / (1 + θ ** (-self.zeta)) ** (1 / self.zeta)
+        prob = 1 / (1 + (1 / θ) ** (self.zeta)) ** (1 / self.zeta)
         return min(max(prob, 1e-3), 1)
 
     def job_filling(self, θ):
@@ -308,8 +297,8 @@ class LagosWrightAiyagariSolver:
     
     def job_fill_inv(self, x):
         """
-        Inverse function of job filling function.
-        :param x: probability of job filling
+        Pin down the market tightness θ given the free-entry condition.
+        :param x: the free-entry condition (right-hand side of the equation)
         :return: tightness
         """
         θ = ((1 / x) ** self.zeta - 1) ** (1 / self.zeta)
@@ -351,7 +340,7 @@ class LagosWrightAiyagariSolver:
         filling = self.job_filling(θ)
         return θ, λ, filling
     
-    def solve_dm_problem_vectorized(self, W_guess, prices):
+    def solve_dm_problem_vectorised(self, W_guess, prices):
         """
         Vectorised version of the DM problem solver.
         :param W_guess: Initial guess for value function
@@ -363,7 +352,7 @@ class LagosWrightAiyagariSolver:
         Rl = prices[1]
         i = prices[2]
 
-        # Initialize arrays - using float32 for memory efficiency if precision allows
+        # Initialise arrays - using float32 for memory efficiency if precision allows
         shape = (self.n_m, self.n_f, self.n_z, self.n_e)
         policy_y0 = np.zeros(shape, dtype=np.float32)
         policy_d0 = np.zeros(shape, dtype=np.float32)
@@ -390,7 +379,7 @@ class LagosWrightAiyagariSolver:
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
                 income = self.wages[z_idx, e_idx]
-                # Vectorize for different asset levels
+                # Vectorise for different asset levels
                 for f_idx, a_f in enumerate(self.f_grid):
                     # Case 3: No preference shock
                     # When there's no preference shock, optimal policy is to deposit all money
@@ -709,7 +698,7 @@ class LagosWrightAiyagariSolver:
             W_guess = self.W
             
         # Step 1: Solve DM problem to get V
-        dm_results = self.solve_dm_problem_vectorized(W_guess, prices)
+        dm_results = self.solve_dm_problem_vectorised(W_guess, prices)
         V = dm_results['V_dm']
         
         # Step 2: Solve CM problem to get updated W
