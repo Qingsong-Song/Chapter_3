@@ -43,18 +43,15 @@ class LagosWrightAiyagariSolver:
         self.n_a = params['n_a']       # Number of asset grid points
         self.n_m = params['n_m']       # Number of money grid points
         self.n_f = params['n_f']       # Number of illiquid asset grid points
-        self.n_d = params['n_d']       # Number of deposit grid points
-        self.n_l = params['n_l']       # Number of loan grid points
+        self.n_b = params['n_b']       # Number of bank grid points
         self.a_max = params['a_max']   # Maximum asset value
         self.a_min = params['a_min']   # Minimum asset value
         self.m_min = params['m_min']   # Minimum money holdings
         self.m_max = params['m_max']   # Maximum money holdings
         self.f_min = params['f_min']   # Minimum illiquid asset holdings
         self.f_max = params['f_max']   # Maximum illiquid asset holdings
-        self.l_min = params['l_min']   # Minimum loan value
-        self.l_max = params['l_max']   # Maximum loan value
-        self.d_min = params['d_min']   # Minimum deposit value
-        self.d_max = params['d_max']   # Maximum deposit value
+        self.b_min = params['b_min']   # Minimum deposit value
+        self.b_max = params['b_max']   # Maximum deposit value
         self.n_e = 2                   # Employment states: [0=unemployed, 1=employed]
         self.n_z = 3                   # Skill types: [0=low, 1=medium, 2=high]
         self.ny = params['ny']         # Number of grid points for DM goods
@@ -74,13 +71,13 @@ class LagosWrightAiyagariSolver:
         self.max_iter = params['max_iter']
         self.tol = params['tol']
         
-        # Initialize grids
+        # Initialise grids
         self.setup_grids(params)
         
-        # Initialize labor market
+        # Initialise labor market
         self.initialise_labor_market()
 
-        # Initialize value and policy functions
+        # Initialise value and policy functions
         self.initialise_functions()
         
         # For storing value function history
@@ -101,11 +98,8 @@ class LagosWrightAiyagariSolver:
         # Illiquid asset grid
         self.f_grid = np.linspace(params['f_min'], params['f_max'], self.n_f)
         
-        # Deposit grid (real terms)
-        self.d_grid = np.linspace(params['d_min'], params['d_max'], self.n_d)
-
-        # Loan grid (real terms)
-        self.l_grid = np.linspace(params['l_min'], params['l_max'], self.n_l)
+        # Bank grid (real terms)
+        self.b_grid = np.linspace(params['b_min'], params['b_max'], self.n_b)
         
         # Employment grid
         self.e_grid = np.array([0, 1])  # 0 = unemployed, 1 = employed
@@ -119,8 +113,8 @@ class LagosWrightAiyagariSolver:
     
     def initialise_functions(self):
         """Initialise value and policy functions with reasonable guesses"""
-        # Initialize arrays using m and f as state variables
-        self.W = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
+        # Initialise arrays using m and f as state variables
+        self.W = np.zeros((self.n_a, self.n_b, self.n_z, self.n_e))
         self.V = np.zeros((self.n_m, self.n_f, self.n_z, self.n_e))
         
         # Initialise W with reasonable guesses using a utility-based approach
@@ -130,34 +124,31 @@ class LagosWrightAiyagariSolver:
                 income_est = self.wages[z_idx, e_idx]
                 
                 for a_idx, a in enumerate(self.a_grid):
-                    for d_idx, d in enumerate(self.d_grid):
-                        for l_idx, l in enumerate(self.l_grid):
-                            # Estimate resources available for consumption
-                            resources = a + (1 + self.prices[2]) * d - (1 + self.prices[2]) * l + income_est
+                    for b_idx, b in enumerate(self.b_grid):
+                        # Estimate resources available for consumption
+                        resources = a + (1 + self.prices[2]) * b + income_est
 
-                            # Ensure minimum consumption
-                            consumption = max(resources * 0.9, self.c_min)  # Consume ~90% of resources
+                        # Ensure minimum consumption
+                        consumption = max(resources * 0.9, self.c_min)  # Consume ~90% of resources
 
-                            # Calculate utility and scale for perpetuity
-                            self.W[a_idx, d_idx, l_idx, z_idx, e_idx] = self.utility(consumption)
+                        # Calculate utility and scale for perpetuity
+                        self.W[a_idx, b_idx, z_idx, e_idx] = self.utility(consumption)
         
-        # Initialize V based on W
+        # Initialise V based on W
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
                 for m_idx, m in enumerate(self.m_grid):
                     for f_idx, f in enumerate(self.f_grid):
                         # Simple estimate: deposit all money, no loans
-                        d_est = m
-                        l_est = 0
+                        b_est = m
                         a = m + f
                         
                         # Find closest grid points
                         a_idx = min(find_nearest_index(self.a_grid, a), self.n_a - 1)
-                        d_idx = min(find_nearest_index(self.d_grid, d_est), self.n_d - 1)
-                        l_idx = min(find_nearest_index(self.l_grid, l_est), self.n_l - 1)
+                        b_idx = min(find_nearest_index(self.b_grid, b_est), self.n_b - 1)
                         
                         # Map to V
-                        self.V[m_idx, f_idx, z_idx, e_idx] = self.W[a_idx, d_idx, l_idx, z_idx, e_idx]
+                        self.V[m_idx, f_idx, z_idx, e_idx] = self.W[a_idx, b_idx, z_idx, e_idx]
 
 
     def initialise_labor_market(self):
@@ -217,7 +208,7 @@ class LagosWrightAiyagariSolver:
     
     def utility_dm(self, y):
         """
-        Utility function for decentralized market -- parameters are different from the centralised market
+        Utility function for decentralised market -- parameters are different from the centralised market
         Generates 26% increase in consumption during preference shocks.
         """
         y = np.asarray(y)
@@ -326,7 +317,7 @@ class LagosWrightAiyagariSolver:
         """
         kappa = self.kappa
         Rl = prices[1]
-        # Get productivity-normalized value of a filled job
+        # Get productivity-normalised value of a filled job
         normalised_rev = self.firm_post_rev(prices=prices)
         
         # Compare expected cost with expected benefit (both normalised by z)
@@ -355,14 +346,12 @@ class LagosWrightAiyagariSolver:
         # Initialise arrays - using float32 for memory efficiency if precision allows
         shape = (self.n_m, self.n_f, self.n_z, self.n_e)
         policy_y0 = np.zeros(shape, dtype=np.float32)
-        policy_d0 = np.zeros(shape, dtype=np.float32)
-        policy_l0 = np.zeros(shape, dtype=np.float32)
+        policy_b0 = np.zeros(shape, dtype=np.float32)
         V0 = np.zeros(shape, dtype=np.float32)
         policy_y1 = np.zeros(shape, dtype=np.float32)
-        policy_d1 = np.zeros(shape, dtype=np.float32)
-        policy_l1 = np.zeros(shape, dtype=np.float32)
+        policy_b1 = np.zeros(shape, dtype=np.float32)
         V1 = np.zeros(shape, dtype=np.float32)
-        policy_d_noshock = np.zeros(shape, dtype=np.float32)
+        policy_b_noshock = np.zeros(shape, dtype=np.float32)
         V_noshock = np.zeros(shape, dtype=np.float32)
         
         # Precompute y-grids for all asset levels
@@ -390,11 +379,11 @@ class LagosWrightAiyagariSolver:
                         # Calculate continuation value
                         w_noshock_values[m_idx] = self.interpolate_2d_vectorised(
                             np.array([a - a_m]), np.array([a_m]),
-                            self.a_grid, self.d_grid,
-                            W_guess[:, :, 0, z_idx, e_idx]
-                        )[0]   # since all values are the same in this vector
+                            self.a_grid, self.b_grid,
+                            W_guess[:, :, z_idx, e_idx]
+                        )[0]   # since all values are the same in this vector (inputs are scalar)
                         # Deposit all money
-                        policy_d_noshock[m_idx, f_idx, z_idx, e_idx] = a_m
+                        policy_b_noshock[m_idx, f_idx, z_idx, e_idx] = a_m
                         
                             
                     # Store no-shock values for all money levels at once
@@ -414,8 +403,8 @@ class LagosWrightAiyagariSolver:
                         
                         w0_nb = self.interpolate_2d_vectorised(
                             a_f, d0, 
-                            self.a_grid, self.d_grid,                # a_f is the total asset
-                            W_guess[:, :, 0, z_idx, e_idx]           # when money is either consumed or deposited
+                            self.a_grid, self.b_grid,                # a_f is the total asset
+                            W_guess[:, :, z_idx, e_idx]           # when money is either consumed or deposited
                         )
                         v0_nb = self.utility_dm(y0_nb) + w0_nb
                         
@@ -431,9 +420,9 @@ class LagosWrightAiyagariSolver:
                             l0 = np.clip(py*y0_b - a_m, 0, effective_max_borrow)   # borrow exactly the amount needed to consume
                             
                             w0_b = self.interpolate_2d_vectorised(
-                                a + l0 - py*y0_b, l0,
-                                self.a_grid, self.l_grid,
-                                W_guess[:, 0, :, z_idx, e_idx]
+                                a + l0 - py*y0_b, -l0,
+                                self.a_grid, self.b_grid,
+                                W_guess[:, :, z_idx, e_idx]
                             )
                             v0_b = self.utility_dm(y0_b) + w0_b
                             
@@ -446,20 +435,17 @@ class LagosWrightAiyagariSolver:
                             # compare all options when ω=0: borrow or not borrow
                             if max_nb_val >= max_b_val:
                                 policy_y0[m_idx, f_idx, z_idx, e_idx] = y0_nb[max_nb_idx]
-                                policy_d0[m_idx, f_idx, z_idx, e_idx] = d0[max_nb_idx]
-                                policy_l0[m_idx, f_idx, z_idx, e_idx] = 0.0
+                                policy_b0[m_idx, f_idx, z_idx, e_idx] = d0[max_nb_idx]
                                 V0[m_idx, f_idx, z_idx, e_idx] = max_nb_val
                             else:
                                 policy_y0[m_idx, f_idx, z_idx, e_idx] = y0_b[max_b_idx]
-                                policy_d0[m_idx, f_idx, z_idx, e_idx] = 0.0
-                                policy_l0[m_idx, f_idx, z_idx, e_idx] = l0[max_b_idx]
+                                policy_b0[m_idx, f_idx, z_idx, e_idx] = -l0[max_b_idx]
                                 V0[m_idx, f_idx, z_idx, e_idx] = max_b_val
                         else:
                             # No borrowing possible, only use no-borrowing case
                             max_idx = np.argmax(v0_nb)
                             policy_y0[m_idx, f_idx, z_idx, e_idx] = y0_nb[max_idx]
-                            policy_d0[m_idx, f_idx, z_idx, e_idx] = d0[max_idx]
-                            policy_l0[m_idx, f_idx, z_idx, e_idx] = 0.0
+                            policy_b0[m_idx, f_idx, z_idx, e_idx] = d0[max_idx]
                             V0[m_idx, f_idx, z_idx, e_idx] = v0_nb[max_idx]
                         
                         # -------------------------------------------------------------------------
@@ -472,8 +458,8 @@ class LagosWrightAiyagariSolver:
                         
                         w1_nb = self.interpolate_2d_vectorised(
                             a_f, d1,       # money is either consumed or deposited; only a_f is the total asset
-                            self.a_grid, self.d_grid,
-                            W_guess[:, :, 0, z_idx, e_idx]
+                            self.a_grid, self.b_grid,
+                            W_guess[:, :, z_idx, e_idx]
                         )
                         v1_nb = self.utility_dm(y1_nb) + w1_nb
                         
@@ -486,9 +472,9 @@ class LagosWrightAiyagariSolver:
                             l1 = np.clip(py*y1_b - a, 0, max_borrow)
                             
                             w1_b = self.interpolate_2d_vectorised(
-                                a + l1 - py*y1_b, l1,
-                                self.a_grid, self.l_grid,
-                                W_guess[:, 0, :, z_idx, e_idx]
+                                a + l1 - py*y1_b, -l1,
+                                self.a_grid, self.b_grid,
+                                W_guess[:, :, z_idx, e_idx]
                             )
                             v1_b = self.utility_dm(y1_b) + w1_b
                             
@@ -500,20 +486,17 @@ class LagosWrightAiyagariSolver:
                             
                             if max_nb_val >= max_b_val:
                                 policy_y1[m_idx, f_idx, z_idx, e_idx] = y1_nb[max_nb_idx]
-                                policy_d1[m_idx, f_idx, z_idx, e_idx] = d1[max_nb_idx]
-                                policy_l1[m_idx, f_idx, z_idx, e_idx] = 0.0
+                                policy_b1[m_idx, f_idx, z_idx, e_idx] = d1[max_nb_idx]
                                 V1[m_idx, f_idx, z_idx, e_idx] = max_nb_val
                             else:
                                 policy_y1[m_idx, f_idx, z_idx, e_idx] = y1_b[max_b_idx]
-                                policy_d1[m_idx, f_idx, z_idx, e_idx] = 0.0
-                                policy_l1[m_idx, f_idx, z_idx, e_idx] = l1[max_b_idx]
+                                policy_b1[m_idx, f_idx, z_idx, e_idx] = -l1[max_b_idx]
                                 V1[m_idx, f_idx, z_idx, e_idx] = max_b_val
                         else:
                             # No borrowing possible, only use no-borrowing case
                             max_idx = np.argmax(v1_nb)
                             policy_y1[m_idx, f_idx, z_idx, e_idx] = y1_nb[max_idx]
-                            policy_d1[m_idx, f_idx, z_idx, e_idx] = d1[max_idx]
-                            policy_l1[m_idx, f_idx, z_idx, e_idx] = 0.0
+                            policy_b1[m_idx, f_idx, z_idx, e_idx] = d1[max_idx]
                             V1[m_idx, f_idx, z_idx, e_idx] = v1_nb[max_idx]
 
         # Calculate expected value with correct probability weighting
@@ -526,12 +509,10 @@ class LagosWrightAiyagariSolver:
             'V1': V1,
             'V_noshock': V_noshock,
             'policy_y0': policy_y0,
-            'policy_d0': policy_d0,
-            'policy_l0': policy_l0,
+            'policy_b0': policy_b0,
             'policy_y1': policy_y1,
-            'policy_d1': policy_d1,
-            'policy_l1': policy_l1,
-            'policy_d_noshock': policy_d_noshock
+            'policy_b1': policy_b1,
+            'policy_b_noshock': policy_b_noshock
         }
     
     def solve_cm_problem_vectorised(self, V_guess, prices):
@@ -547,7 +528,7 @@ class LagosWrightAiyagariSolver:
         i = prices[2]
 
         # Initialise value and policy functions
-        w_value = np.zeros((self.n_a, self.n_d, self.n_l, self.n_z, self.n_e))
+        w_value = np.zeros((self.n_a, self.n_b, self.n_z, self.n_e))
         policy_m = np.zeros_like(w_value)
         policy_f = np.zeros_like(w_value)
 
@@ -556,36 +537,35 @@ class LagosWrightAiyagariSolver:
             for z_idx in range(self.n_z):
                 income = self.wages[z_idx, e_idx]
                 
-                # Vectorise over current state (a, d, l)
+                # Vectorise over current state (a, b)
                 for a_idx, a in enumerate(self.a_grid):
-                    for d_idx, d in enumerate(self.d_grid):
-                        for l_idx, l in enumerate(self.l_grid):
-                            # Calculate total resources available (RHS of the budget constraint)
-                            total_resources = a + (1 + i) * d - (1 + i) * l + income
-                            
-                            # Initialize choice array
-                            w_choice = np.full((self.n_m, self.n_f), -1e5)  # Default to a very negative
-                            
-                            # Calculate continuation values for valid portfolio combinations only
-                            for m_idx, m_prime in enumerate(self.m_grid):
-                                for f_idx, f_prime in enumerate(self.f_grid):
-                                    
-                                    # Calculate consumption
-                                    c = total_resources - f_prime / Rl - m_prime / self.Rm
-                                    
-                                    if c >= self.c_min:  # a small consumption level
-                                        # Expected value over employment transitions
-                                        v_cont = V_guess[m_idx, f_idx, z_idx, :] @ self.P[e_idx, :]
-                                        w_choice[m_idx, f_idx] = self.utility(c) + self.beta * v_cont
-                            
-                            # Find the maximum value and corresponding indices
-                            max_val = np.max(w_choice)
-                            max_indices = np.unravel_index(np.argmax(w_choice), w_choice.shape)
-                            
-                            # Store the maximum value and corresponding policies
-                            w_value[a_idx, d_idx, l_idx, z_idx, e_idx] = max_val
-                            policy_m[a_idx, d_idx, l_idx, z_idx, e_idx] = self.m_grid[max_indices[0]]
-                            policy_f[a_idx, d_idx, l_idx, z_idx, e_idx] = self.f_grid[max_indices[1]]
+                    for b_idx, b in enumerate(self.b_grid):
+                        # Calculate total resources available (RHS of the budget constraint)
+                        total_resources = a + (1 + i) * b + income
+                        
+                        # Initialise choice array
+                        w_choice = np.full((self.n_m, self.n_f), -1e5)  # Default to a very negative
+                        
+                        # Calculate continuation values for valid portfolio combinations only
+                        for m_idx, m_prime in enumerate(self.m_grid):
+                            for f_idx, f_prime in enumerate(self.f_grid):
+                                
+                                # Calculate consumption
+                                c = total_resources - f_prime / Rl - m_prime / self.Rm
+                                
+                                if c >= self.c_min:  # a small consumption level
+                                    # Expected value over employment transitions
+                                    v_cont = V_guess[m_idx, f_idx, z_idx, :] @ self.P[e_idx, :]
+                                    w_choice[m_idx, f_idx] = self.utility(c) + self.beta * v_cont
+                        
+                        # Find the maximum value and corresponding indices
+                        max_val = np.max(w_choice)
+                        max_indices = np.unravel_index(np.argmax(w_choice), w_choice.shape)
+                        
+                        # Store the maximum value and corresponding policies
+                        w_value[a_idx, b_idx, z_idx, e_idx] = max_val
+                        policy_m[a_idx, b_idx, z_idx, e_idx] = self.m_grid[max_indices[0]]
+                        policy_f[a_idx, b_idx, z_idx, e_idx] = self.f_grid[max_indices[1]]
 
         # Return updated value function and policy functions
         return {
@@ -635,7 +615,7 @@ class LagosWrightAiyagariSolver:
 
     def interpolate_2d_vectorised(self, x_values, y_values, x_grid, y_grid, grid_values):
         """
-        Vectorized bilinear interpolation for arrays of query points
+        Vectorised bilinear interpolation for arrays of query points
         
         Parameters:
         -----------
@@ -894,13 +874,12 @@ class LagosWrightAiyagariSolver:
         fig.suptitle(f'Money Policy Function (z={self.z_grid[z_idx]:.2f}, Iteration {iteration})', fontsize=16)
         
         # Get slice of policy function for specific deposit and loan values
-        d_idx = self.n_d // 2
-        l_idx = 0  # No loans
+        b_idx = self.n_b // 4
         
         # For employed
         for f_idx in [0, self.n_f//4, self.n_f//2, 3*self.n_f//4, self.n_f-1]:
             f_val = self.f_grid[f_idx]
-            axes[0].plot(self.m_grid, cm_results['policy_m'][:, d_idx, l_idx, z_idx, 1],
+            axes[0].plot(self.m_grid, cm_results['policy_m'][:, b_idx, z_idx, 1],
                         label=f'f={f_val:.2f}')
         
         axes[0].plot(self.m_grid, self.m_grid, 'k--', label='45° line')
@@ -913,7 +892,7 @@ class LagosWrightAiyagariSolver:
         # For unemployed
         for f_idx in [0, self.n_f//4, self.n_f//2, 3*self.n_f//4, self.n_f-1]:
             f_val = self.f_grid[f_idx]
-            axes[1].plot(self.m_grid, cm_results['policy_m'][:, d_idx, l_idx, z_idx, 0],
+            axes[1].plot(self.m_grid, cm_results['policy_m'][:, b_idx, z_idx, 0],
                         label=f'f={f_val:.2f}')
         
         axes[1].plot(self.m_grid, self.m_grid, 'k--', label='45° line')
@@ -934,7 +913,7 @@ class LagosWrightAiyagariSolver:
         # For employed
         for m_idx in [0, self.n_m//4, self.n_m//2, 3*self.n_m//4, self.n_m-1]:
             m_val = self.m_grid[m_idx]
-            axes[0].plot(self.f_grid, cm_results['policy_f'][:, d_idx, l_idx, z_idx, 1],
+            axes[0].plot(self.f_grid, cm_results['policy_f'][:, b_idx, z_idx, 1],
                         label=f'm={m_val:.2f}')
         
         axes[0].plot(self.f_grid, self.f_grid, 'k--', label='45° line')
@@ -947,7 +926,7 @@ class LagosWrightAiyagariSolver:
         # For unemployed
         for m_idx in [0, self.n_m//4, self.n_m//2, 3*self.n_m//4, self.n_m-1]:
             m_val = self.m_grid[m_idx]
-            axes[1].plot(self.f_grid, cm_results['policy_f'][:, d_idx, l_idx, z_idx, 0],
+            axes[1].plot(self.f_grid, cm_results['policy_f'][:, b_idx, z_idx, 0],
                         label=f'm={m_val:.2f}')
         
         axes[1].plot(self.f_grid, self.f_grid, 'k--', label='45° line')
@@ -973,15 +952,15 @@ class LagosWrightAiyagariSolver:
             f_val = self.f_grid[f_idx]
             
             # For employed
-            m_next = cm_results['policy_m'][:, d_idx, l_idx, z_idx, 1]
-            f_next = cm_results['policy_f'][:, d_idx, l_idx, z_idx, 1]
+            m_next = cm_results['policy_m'][:, b_idx, z_idx, 1]
+            f_next = cm_results['policy_f'][:, b_idx, z_idx, 1]
             ratio = np.divide(m_next, m_next + f_next, out=np.zeros_like(m_next), where=(m_next + f_next) > 0)
             
             axes[0].plot(self.m_grid, ratio, label=f'f={f_val:.2f}')
             
             # For unemployed
-            m_next = cm_results['policy_m'][:, d_idx, l_idx, z_idx, 0]
-            f_next = cm_results['policy_f'][:, d_idx, l_idx, z_idx, 0]
+            m_next = cm_results['policy_m'][:, b_idx, z_idx, 0]
+            f_next = cm_results['policy_f'][:, b_idx, z_idx, 0]
             ratio = np.divide(m_next, m_next + f_next, out=np.zeros_like(m_next), where=(m_next + f_next) > 0)
             
             axes[1].plot(self.m_grid, ratio, label=f'f={f_val:.2f}')
@@ -1029,18 +1008,15 @@ params = {
         'n_a': 10,         # Number of asset grid points (for testing)
         'n_m': 10,         # Number of money grid points
         'n_f': 10,         # Number of illiquid asset grid points
-        'n_d': 10,         # Number of deposit grid points
-        'n_l': 10,         # Number of loan grid points
+        'n_b': 20,         # Number of bank grid points
         'a_min': 0.0,      # Minimum asset holdings
         'a_max': 20.0,     # Maximum asset holdings
         'm_min': 0.0,      # Minimum money holdings
         'm_max': 10.0,     # Maximum money holdings
         'f_min': 0.0,      # Minimum illiquid holdings
         'f_max': 10.0,     # Maximum illiquid holdings
-        'l_min': 0,        # Minimum loan value
-        'l_max': 10.0,     # Maximum loan value
-        'd_min': 0,        # Minimum deposit value
-        'd_max': 10.0,     # Maximum deposit value
+        'b_min': -10.0,        # Minimum loan value
+        'b_max': 10.0,     # Maximum loan value
         'ny': 20,          # Number of grid points for DM goods
         
         # Price parameters
@@ -1057,7 +1033,7 @@ params = {
         'tol': 1e-5        # Convergence tolerance
     }
 
-# Initialize solver with parameters
+# Initialise solver with parameters
 print("Initializing LagosWrightAiyagariSolver...")
 solver = LagosWrightAiyagariSolver(params)
 
