@@ -18,6 +18,44 @@ def find_nearest_lower_index(grid, value):
         return 0
     return indices[-1]
 
+def find_closest_indices(grid, value):
+
+    """
+    Find the two closest indices in the grid to the given value.
+    
+    Parameters:
+    -----------
+    value : float
+        The value to find the closest indices for
+    grid : numpy.ndarray
+        The grid of values
+    
+    Returns:
+    --------
+    tuple
+        (lower_index, upper_index, lower_weight, upper_weight)
+    """
+    # Check if value is outside the grid
+    if value <= grid[0]:
+        return 0, 0, 1.0, 0.0
+    elif value >= grid[-1]:
+        return len(grid)-1, len(grid)-1, 1.0, 0.0
+    
+    # Find the index of the grid point just below the value
+    lower_idx = np.searchsorted(grid, value, side='right') - 1
+    upper_idx = lower_idx + 1
+    
+    # Calculate weights for interpolation
+    grid_range = grid[upper_idx] - grid[lower_idx]
+    if grid_range == 0:  # Avoid division by zero
+        lower_weight = 1.0
+        upper_weight = 0.0
+    else:
+        lower_weight = (grid[upper_idx] - value) / grid_range
+        # upper_weight = (value - grid[lower_idx]) / grid_range
+    
+    return lower_idx, upper_idx, lower_weight
+
 
 class LagosWrightAiyagariSolver:
     def __init__(self, params):
@@ -203,7 +241,7 @@ class LagosWrightAiyagariSolver:
         safe_c = np.maximum(c, eps)
         
         return np.where(c <= 0,
-                    -1e5,  # penalty for non-positive consumption
+                    -1e3,  # penalty for non-positive consumption
                     (safe_c ** (1 - self.gamma) - 1) / (1 - self.gamma))
     
     def utility_dm(self, y):
@@ -544,7 +582,7 @@ class LagosWrightAiyagariSolver:
                         total_resources = a + (1 + i) * b + income
                         
                         # Initialise choice array
-                        w_choice = np.full((self.n_m, self.n_f), -1e5)  # Default to a very negative
+                        w_choice = np.full((self.n_m, self.n_f), -1e3)  # Default to a very negative
                         
                         # Calculate continuation values for valid portfolio combinations only
                         for m_idx, m_prime in enumerate(self.m_grid):
@@ -574,44 +612,111 @@ class LagosWrightAiyagariSolver:
             'policy_f': policy_f,
         }
 
-    
-    @staticmethod    
-    def find_closest_indices(value, grid):
+
+    def household_transition(self, G_guess, prices, cm_output, dm_output):
         """
-        Find the two closest indices in the grid to the given value.
-        
-        Parameters:
-        -----------
-        value : float
-            The value to find the closest indices for
-        grid : numpy.ndarray
-            The grid of values
-        
-        Returns:
-        --------
-        tuple
-            (lower_index, upper_index, lower_weight, upper_weight)
+        Input:   
+            G_guess: Initial guess for household mass distribution
+            prices: Current prices [py, Rl, i]
+            cm_output: output from the CM problem: W function, policy_m, policy_f
+            dm_output: output from the DM problem: V function, policy_y0, policy_b0, 
+                        policy_y1, policy_b1, policy_b_noshock
+        Output:
+            G_new: Updated household mass distribution
         """
-        # Check if value is outside the grid
-        if value <= grid[0]:
-            return 0, 0, 1.0, 0.0
-        elif value >= grid[-1]:
-            return len(grid)-1, len(grid)-1, 1.0, 0.0
-        
-        # Find the index of the grid point just below the value
-        lower_idx = np.searchsorted(grid, value, side='right') - 1
-        upper_idx = lower_idx + 1
-        
-        # Calculate weights for interpolation
-        grid_range = grid[upper_idx] - grid[lower_idx]
-        if grid_range == 0:  # Avoid division by zero
-            lower_weight = 1.0
-            upper_weight = 0.0
-        else:
-            lower_weight = (grid[upper_idx] - value) / grid_range
-            upper_weight = (value - grid[lower_idx]) / grid_range
-        
-        return lower_idx, upper_idx, lower_weight, upper_weight
+        # Unpack prices
+        py = prices[0]
+        Rl = prices[1]
+        i = prices[2]
+
+        # Initialise transition matrix
+        G_new = np.zeros_like(G_guess)
+
+        # unpack policy functions
+        policy_m = cm_output['policy_m']
+        policy_f = cm_output['policy_f']
+        policy_y0 = dm_output['policy_y0']
+        policy_b0 = dm_output['policy_b0']
+        policy_y1 = dm_output['policy_y1']
+        policy_b1 = dm_output['policy_b1']
+        policy_b_noshock = dm_output['policy_b_noshock']
+
+        # Loop over employment status and skill types
+        for e_idx in range(self.n_e):
+            for z_idx in range(self.n_z):
+
+                # Vectorise over current state (a, b)
+                for a_idx, a in enumerate(self.a_grid):
+                    for b_idx, b in enumerate(self.b_grid):
+                        # Get the current mass of households in this state
+                        g = G_guess[a_idx, b_idx, z_idx, e_idx]
+
+                        # Calculate the next state based on the policies
+                        # Formed from the pre-determined grids
+                        m_prime = policy_m[a_idx, b_idx, z_idx, e_idx]
+                        f_prime = policy_f[a_idx, b_idx, z_idx, e_idx]
+                        total_asset = m_prime + f_prime
+                        # No need to calculate the weights since it came from the grid exactly
+                        m_idx = find_nearest_index(self.m_grid, m_prime)
+                        f_idx = find_nearest_index(self.f_grid, f_prime)
+                        
+                        # Iterate over the next-period employment status
+                        for e_next_idx in range(self.n_e):
+                            # Transition probabilities
+                            prob = self.P[e_idx, e_next_idx]
+
+                            # unpack the consumption and borrowing policies
+                            y_0 = policy_y0[m_idx, f_idx, z_idx, e_next_idx]
+                            b_0 = policy_b0[m_idx, f_idx, z_idx, e_next_idx]
+                            y_1 = policy_y1[m_idx, f_idx, z_idx, e_next_idx]
+                            b_1 = policy_b1[m_idx, f_idx, z_idx, e_next_idx]
+                            b_noshock = policy_b_noshock[m_idx, f_idx, z_idx, e_next_idx]
+
+                            # Calculate the next state
+                            # 1: No shock (ϵ = 0)
+                            a_next_noshock = total_asset - b_noshock
+                            a_noshock_lower, a_noshock_upper, a_noshock_wt = find_closest_indices(self.a_grid, a_next_noshock)
+                            b_noshock_lower, b_noshock_upper, b_noshock_wt = find_closest_indices(self.b_grid, b_noshock)
+                            G_new[a_noshock_lower, b_noshock_lower, z_idx, e_next_idx] += (g * (1 - self.alpha) * 
+                                                                                            a_noshock_wt * b_noshock_wt * prob)
+                            G_new[a_noshock_upper, b_noshock_lower, z_idx, e_next_idx] += (g * (1 - self.alpha) * 
+                                                                                            (1 - a_noshock_wt) * b_noshock_wt * prob)
+                            G_new[a_noshock_lower, b_noshock_upper, z_idx, e_next_idx] += (g * (1 - self.alpha) * 
+                                                                                            a_noshock_wt * (1 - b_noshock_wt) * prob)
+                            G_new[a_noshock_upper, b_noshock_upper, z_idx, e_next_idx] += (g * (1 - self.alpha) * 
+                                                                                            (1 - a_noshock_wt) * (1 - b_noshock_wt) * prob)
+                            # 2. Shock (ϵ = 1)
+                            # 2.1: Only cash: ω=0
+                            a0_next = total_asset - py * y_0 - b_0
+                            a0_next_lower, a0_next_upper, a0_wt = find_closest_indices(self.a_grid, a0_next)
+                            b0_lower, b0_upper, b0_wt = find_closest_indices(self.b_grid, b_0)
+                            G_new[a0_next_lower, b0_lower, z_idx, e_next_idx] += (g * self.alpha * self.alpha_0 * a0_wt * b0_wt * prob)
+                            G_new[a0_next_upper, b0_lower, z_idx, e_next_idx] += (g * self.alpha * self.alpha_0 *
+                                                                                    (1 - a0_wt) * b0_wt * prob)
+                            G_new[a0_next_lower, b0_upper, z_idx, e_next_idx] += (g * self.alpha * self.alpha_0 *
+                                                                                    a0_wt * (1 - b0_wt) * prob)
+                            G_new[a0_next_upper, b0_upper, z_idx, e_next_idx] += (g * self.alpha * self.alpha_0 *
+                                                                                    (1 - a0_wt) * (1 - b0_wt) * prob)
+
+                            # 2.2: Only illiquid asset: ω=1
+                            a1_next = total_asset - py * y_1 - b_1
+                            a1_next_lower, a1_next_upper, a1_wt = find_closest_indices(self.a_grid, a1_next)
+                            b1_lower, b1_upper, b1_wt = find_closest_indices(self.b_grid, b_1)
+                            G_new[a1_next_lower, b1_lower, z_idx, e_next_idx] += (g * self.alpha * self.alpha_1 *
+                                                                                    a1_wt * b1_wt * prob)
+                            G_new[a1_next_upper, b1_lower, z_idx, e_next_idx] += (g * self.alpha * self.alpha_1 *
+                                                                                    (1 - a1_wt) * b1_wt * prob)
+                            G_new[a1_next_lower, b1_upper, z_idx, e_next_idx] += (g * self.alpha * self.alpha_1 *
+                                                                                    a1_wt * (1 - b1_wt) * prob)
+                            G_new[a1_next_upper, b1_upper, z_idx, e_next_idx] += (g * self.alpha * self.alpha_1 *
+                                                                                    (1 - a1_wt) * (1 - b1_wt) * prob)
+        # Normalise the new distribution
+        G_new /= np.sum(G_new)      
+
+        # Return the updated distribution
+        return G_new
+                
+
 
     def interpolate_2d_vectorised(self, x_values, y_values, x_grid, y_grid, grid_values):
         """
@@ -775,6 +880,11 @@ class LagosWrightAiyagariSolver:
         # Store final value functions
         self.W = W_current
         self.V = results['V']
+
+        print("Exporting final V and W to Excel...")
+        self.export_4d_to_excel(self.V, 'exports/V_final.xlsx', sheet_name='ValueFunction')
+        self.export_4d_to_excel(self.W, 'exports/W_final.xlsx', sheet_name='PolicyFunction')
+        print("Export complete.")
         
         
         # Return complete solution
@@ -788,6 +898,19 @@ class LagosWrightAiyagariSolver:
             'total_time': total_time,
             'history': history
         }
+    
+    @staticmethod
+    def export_4d_to_excel(array, filename, sheet_name='Sheet1'):
+        """
+        Flattens a 4D numpy array and exports it to an Excel file.
+        Each row will contain the 4 indices and the value.
+        """
+        dim1, dim2, dim3, dim4 = array.shape
+        idx = np.indices((dim1, dim2, dim3, dim4)).reshape(4, -1).T
+        values = array.flatten()
+        df = pd.DataFrame(idx, columns=['i', 'j', 'k', 'l'])
+        df['value'] = values
+        df.to_excel(filename, sheet_name=sheet_name, index=False)
 
     def plot_functions(self, iteration, results):
         """
