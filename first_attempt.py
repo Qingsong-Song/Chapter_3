@@ -33,13 +33,13 @@ def find_closest_indices(grid, value):
     Returns:
     --------
     tuple
-        (lower_index, upper_index, lower_weight, upper_weight)
+        (lower_index, upper_index, lower_weight)
     """
     # Check if value is outside the grid
     if value <= grid[0]:
-        return 0, 0, 1.0, 0.0
+        return 0, 0, 1.0
     elif value >= grid[-1]:
-        return len(grid)-1, len(grid)-1, 1.0, 0.0
+        return len(grid)-1, len(grid)-1, 1.0
     
     # Find the index of the grid point just below the value
     lower_idx = np.searchsorted(grid, value, side='right') - 1
@@ -49,7 +49,6 @@ def find_closest_indices(grid, value):
     grid_range = grid[upper_idx] - grid[lower_idx]
     if grid_range == 0:  # Avoid division by zero
         lower_weight = 1.0
-        upper_weight = 0.0
     else:
         lower_weight = (grid[upper_idx] - value) / grid_range
         # upper_weight = (value - grid[lower_idx]) / grid_range
@@ -715,6 +714,70 @@ class LagosWrightAiyagariSolver:
 
         # Return the updated distribution
         return G_new
+
+
+    def iterate_household_distribution(self, prices, cm_output, dm_output, tol=1e-5, max_iter=1000, verbose=True):
+        """
+        Iteratively solve for the stationary household distribution.
+
+        Parameters:
+        -----------
+        self : model object
+            The current model instance (assumed to include a_grid, b_grid, n_z, n_e, and household_transition method).
+        prices : list
+            Current prices [py, Rl, i].
+        cm_output : dict
+            Output from solve_cm_problem_vectorised.
+        dm_output : dict
+            Output from solve_dm_problem_vectorised.
+        tol : float
+            Convergence tolerance.
+        max_iter : int
+            Maximum number of iterations.
+        verbose : bool
+            If True, print convergence diagnostics.
+
+        Returns:
+        --------
+        G_star : ndarray
+            Stationary household distribution.
+        error_list : list
+            List of errors in each iteration.
+        """
+        # Initialise a uniform distribution
+        shape = (len(self.a_grid), len(self.b_grid), self.n_z, self.n_e)
+        G = np.ones(shape) / np.prod(shape)
+        error_list = []
+
+        for it in range(max_iter):
+            G_new = self.household_transition(G, prices, cm_output, dm_output)
+            error = np.max(np.abs(G_new - G))
+            error_list.append(error)
+
+            if verbose:
+                print(f"Iteration {it+1}: max error = {error:.2e}")
+
+            if error < tol:
+                if verbose:
+                    print(f"\nConverged after {it+1} iterations.")
+                break
+
+            G = G_new.copy()
+        else:
+            raise RuntimeError("Household distribution did not converge within the max number of iterations.")
+
+        # Plot the convergence error
+        plt.figure(figsize=(6, 4))
+        plt.plot(error_list, marker='o')
+        plt.yscale('log')
+        plt.xlabel('Iteration')
+        plt.ylabel('Max Error')
+        plt.title('Convergence of Household Distribution')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        return G_new, error_list
                 
 
 
@@ -809,75 +872,50 @@ class LagosWrightAiyagariSolver:
             'converged': max_diff < self.tol
         }
 
-    def solve_model(self, prices=None, plot_frequency=10, export_frequency=20):
-        """
-        Solve the model by iterating until convergence or max iterations reached.
-        Plots value and policy functions periodically during iteration.
-        
-        :param prices: Custom prices [py, Rl, i], uses self.prices if None
-        :param plot_frequency: How often to plot (every N iterations)
-        :param export_frequency: How often to export value functions (every N iterations)
-        :return: Solution dictionary with value functions, policy functions, and convergence info
-        """
+    def solve_model(self, prices=None, plot_frequency=50, report_frequency=100, tol_dist=1e-5, max_iter_dist=100000):
         if prices is None:
             prices = self.prices
-            
-        # Initialize
+
+        # Stage 1: Value Function Iteration
         W_current = self.W.copy()
         iteration = 0
         converged = False
-        start_time = time.time()
-        
-        # Create directory for exports if it doesn't exist
-        if not os.path.exists('exports'):
-            os.makedirs('exports')
-        
-        # Store convergence history
-        history = {
+        start_time_vf = time.time()
+
+        os.makedirs('exports', exist_ok=True)
+
+        vf_history = {
             'max_diff': [],
             'mean_diff': [],
             'iteration_time': []
         }
-        
-        # Main solution loop
+
         while iteration < self.max_iter and not converged:
             iter_start = time.time()
-            
-            # Perform one iteration
             results = self.solver_iteration(prices, W_current)
             W_current = results['W']
-            
-            # Store convergence metrics
             max_diff = results['max_diff']
             mean_diff = results['mean_diff']
             converged = results['converged']
-            
-            # Calculate iteration time
             iter_time = time.time() - iter_start
-            history['max_diff'].append(max_diff)
-            history['mean_diff'].append(mean_diff)
-            history['iteration_time'].append(iter_time)
-            
-            # Display progress
+
+            vf_history['max_diff'].append(max_diff)
+            vf_history['mean_diff'].append(mean_diff)
+            vf_history['iteration_time'].append(iter_time)
+
             iteration += 1
-            if iteration % 5 == 0 or converged:
-                print(f"Iteration {iteration}: Max diff = {max_diff:.6e}, Mean diff = {mean_diff:.6e}, Time = {iter_time:.2f}s")
-            
-            # Plot current value and policy functions
+            if iteration % report_frequency == 0 or converged:
+                print(f"[VF] Iter {iteration}: Max diff = {max_diff:.2e}, Mean diff = {mean_diff:.2e}, Time = {iter_time:.2f}s")
+
             if iteration % plot_frequency == 0 or converged:
                 self.plot_functions(iteration, results)
-            
 
-        
-        # Final results
-        total_time = time.time() - start_time
-        
+        total_time_vf = time.time() - start_time_vf
         if converged:
-            print(f"\nConverged after {iteration} iterations. Total time: {total_time:.2f}s")
+            print(f"\nValue function converged in {iteration} iterations, {total_time_vf:.2f} seconds.")
         else:
-            print(f"\nDid not converge after {self.max_iter} iterations. Total time: {total_time:.2f}s")
-        
-        # Store final value functions
+            print(f"\nValue function did not converge in {self.max_iter} iterations, {total_time_vf:.2f} seconds.")
+
         self.W = W_current
         self.V = results['V']
 
@@ -885,18 +923,74 @@ class LagosWrightAiyagariSolver:
         self.export_4d_to_excel(self.V, 'exports/V_final.xlsx', sheet_name='ValueFunction')
         self.export_4d_to_excel(self.W, 'exports/W_final.xlsx', sheet_name='PolicyFunction')
         print("Export complete.")
-        
-        
-        # Return complete solution
+
+        # Stage 2: Stationary Distribution Iteration
+        print("\nStarting household distribution iteration...")
+        dist_start = time.time()
+        shape = (len(self.a_grid), len(self.b_grid), self.n_z, self.n_e)
+        G = np.ones(shape) / np.prod(shape)
+        dis_history = {
+            'max_diff': [],
+            'iteration_time': []
+        }
+
+        cm_output = {
+            'policy_m': results['cm_results']['policy_m'],
+            'policy_f': results['cm_results']['policy_f']
+        }
+
+        dm_output = {
+            'policy_y0': results['dm_results']['policy_y0'],
+            'policy_y1': results['dm_results']['policy_y1'],
+            'policy_b0': results['dm_results']['policy_b0'],
+            'policy_b1': results['dm_results']['policy_b1'],
+            'policy_b_noshock': results['dm_results']['policy_b_noshock']
+        }
+
+        for dist_iter in range(max_iter_dist):
+            G_new = self.household_transition(G, prices, cm_output, dm_output)
+            error = np.max(np.abs(G_new - G))
+            dis_history['max_diff'].append(error)
+            iter_time = time.time() - dist_start
+            dis_history['iteration_time'].append(iter_time)
+
+            if dist_iter % report_frequency == 0 or error < tol_dist:
+                print(f"[DIST] Iter {dist_iter+1}: max error = {error:.2e}")
+
+            if error < tol_dist:
+                print(f"\nDistribution converged in {dist_iter+1} iterations.")
+                break
+
+            G = G_new.copy()
+        else:
+            raise RuntimeError("Household distribution did not converge.")
+
+        total_time_dist = time.time() - dist_start
+
+        # Plot convergence error
+        plt.figure(figsize=(6, 4))
+        plt.plot(dis_history['max_diff'], marker='o')
+        plt.yscale('log')
+        plt.xlabel('Iteration')
+        plt.ylabel('Max Error')
+        plt.title('Convergence of Household Distribution')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig('exports/distribution_convergence.png')
+        plt.close()
+
         return {
-            'W': W_current,
-            'V': results['V'],
-            'dm_results': results['dm_results'],
-            'cm_results': results['cm_results'],
+            'W': self.W,
+            'V': self.V,
+            'G': G_new,
             'converged': converged,
             'iterations': iteration,
-            'total_time': total_time,
-            'history': history
+            'iterations_distribution': dist_iter + 1,
+            'time_value': total_time_vf,
+            'time_distribution': total_time_dist,
+            'total_time': total_time_vf + total_time_dist,
+            'history_value': vf_history,
+            'history_distribution': dis_history
         }
     
     @staticmethod
@@ -1177,20 +1271,20 @@ print(f"  Wages (unemployed, z=1): {solver.wages[1, 0]:.4f}")
 
 # Solve the model
 print("\nSolving model...")
-solution = solver.solve_model(prices=baseline_prices, plot_frequency=10, export_frequency=20)
+solution = solver.solve_model(prices=baseline_prices, plot_frequency=10, report_frequency=20)
 
 # Print results
 print("\nSolution results:")
 print(f"  Converged: {solution['converged']}")
 print(f"  Iterations: {solution['iterations']}")
 print(f"  Total time: {solution['total_time']:.2f} seconds")
-print(f"  Final max diff: {solution['history']['max_diff'][-1]:.6e}")
+print(f"  Final max diff: {solution['history_value']['max_diff'][-1]:.6e}")
 
 # Plot convergence history
 plt.figure(figsize=(10, 6))
-plt.semilogy(range(1, len(solution['history']['max_diff'])+1), 
+plt.semilogy(range(1, len(solution['history_value']['max_diff'])+1), 
             solution['history']['max_diff'], 'b-', label='Max Diff')
-plt.semilogy(range(1, len(solution['history']['mean_diff'])+1), 
+plt.semilogy(range(1, len(solution['dis_history']['mean_diff'])+1), 
             solution['history']['mean_diff'], 'r--', label='Mean Diff')
 plt.axhline(y=params['tol'], color='k', linestyle=':', label='Tolerance')
 plt.xlabel('Iteration')
