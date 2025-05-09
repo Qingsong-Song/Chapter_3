@@ -1271,7 +1271,7 @@ print(f"  Wages (unemployed, z=1): {solver.wages[1, 0]:.4f}")
 
 # Solve the model
 print("\nSolving model...")
-solution = solver.solve_model(prices=baseline_prices, plot_frequency=10, report_frequency=20)
+solution = solver.solve_model(prices=baseline_prices, plot_frequency=50, report_frequency=100)
 
 # Print results
 print("\nSolution results:")
@@ -1280,18 +1280,35 @@ print(f"  Iterations: {solution['iterations']}")
 print(f"  Total time: {solution['total_time']:.2f} seconds")
 print(f"  Final max diff: {solution['history_value']['max_diff'][-1]:.6e}")
 
-# Plot convergence history
+## Ensure 'plots' directory exists
+os.makedirs('plots', exist_ok=True)
+
+# --- Plot Value Function Convergence ---
 plt.figure(figsize=(10, 6))
-plt.semilogy(range(1, len(solution['history_value']['max_diff'])+1), 
-            solution['history']['max_diff'], 'b-', label='Max Diff')
-plt.semilogy(range(1, len(solution['dis_history']['mean_diff'])+1), 
-            solution['history']['mean_diff'], 'r--', label='Mean Diff')
+plt.semilogy(range(1, len(solution['history_value']['max_diff']) + 1), 
+             solution['history_value']['max_diff'], 'b-', label='Max Diff')
+plt.semilogy(range(1, len(solution['history_value']['mean_diff']) + 1), 
+             solution['history_value']['mean_diff'], 'r--', label='Mean Diff')
 plt.axhline(y=params['tol'], color='k', linestyle=':', label='Tolerance')
 plt.xlabel('Iteration')
 plt.ylabel('Value Function Difference (log scale)')
-plt.title('Convergence History')
+plt.title('Value Function Convergence History')
 plt.legend()
 plt.grid(True)
-plt.savefig('plots/convergence_history.png')
+plt.tight_layout()
+plt.savefig('plots/value_function_convergence.png')
+plt.close()
 
-print("\nAnalysis complete. Check the 'plots' and 'exports' directories for visualizations and data.")
+# --- Plot Distribution Convergence ---
+plt.figure(figsize=(8, 5))
+plt.semilogy(range(1, len(solution['history_distribution']['max_diff']) + 1),
+             solution['history_distribution']['max_diff'], marker='o', label='Max Error')
+plt.axhline(y=1e-5, color='k', linestyle=':', label='Tolerance')  # match tol_dist if different
+plt.xlabel('Iteration')
+plt.ylabel('Distribution Difference (log scale)')
+plt.title('Household Distribution Convergence')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig('plots/distribution_convergence.png')
+plt.close()
