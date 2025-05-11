@@ -872,6 +872,84 @@ class LagosWrightAiyagariSolver:
             'converged': max_diff < self.tol
         }
 
+
+    def market_clearing(self, prices, G, dm_result, cm_result):
+        """
+        Market clearing condition: 
+            Goods market: 
+              - Demand: y_omega + y [am, af, z, e] in the DM;
+              - Supply: employment * production, integreated across different z.
+            Illiquid asset market:
+              - Demand: af [a, b, z, e] in the CM;
+              - Supply: exogenous government bond + profits from operating firms.
+            Bank market:
+              - Demand: borrowing from households;
+              - Supply: deposits from households.
+        """
+
+        # Unpack policy functions
+        policy_y0 = dm_result['policy_y0']
+        policy_b0 = dm_result['policy_b0']
+        policy_y1 = dm_result['policy_y1']
+        policy_b1 = dm_result['policy_b1']
+        policy_b_noshock = dm_result['policy_b_noshock']
+        policy_f = cm_result['policy_f']
+        policy_m = cm_result['policy_m']
+
+        # Initialise asset distribution F
+        F = np.zeros((self.n_m, self.n_f, self.n_z, self.n_e))
+
+        # Initialise market agregates
+        # Goods market
+        Yd = 0.0
+        Ys = 0.0
+        # Bank market
+        Bd = 0.0
+        Bs = 0.0
+        # Illiquid asset market
+        Fd = 0.0
+        Fs = 0.0
+
+        # Loop over all states in household distribution G
+        for e_idx in range(self.n_e):
+            for z_idx in range(self.n_z):
+                for a_idx in range(self.n_a):
+                    for b_idx in range(self.n_b):
+                        # Get the current mass of households in this state
+                        g = G[a_idx, b_idx, z_idx, e_idx]
+
+                        # Calculate the asset distribution F
+                        af = policy_f[a_idx, b_idx, z_idx, e_idx]
+                        am = policy_m[a_idx, b_idx, z_idx, e_idx]
+                        af_lower, af_upper, af_wt = find_closest_indices(self.f_grid, af)
+                        am_lower, am_upper, am_wt = find_closest_indices(self.m_grid, am)
+                        F[am_lower, af_lower, z_idx, e_idx] += g * am_wt * af_wt
+                        F[am_upper, af_lower, z_idx, e_idx] += g * (1 - am_wt) * af_wt
+                        F[am_lower, af_upper, z_idx, e_idx] += g * am_wt * (1 - af_wt)
+                        F[am_upper, af_upper, z_idx, e_idx] += g * (1 - am_wt) * (1 - af_wt)
+
+
+                for m_idx in range(self.n_m):
+                    for f_idx in range(self.n_f):
+                        # Get the current mass of households in this state
+                        f_mass = F[m_idx, f_idx, z_idx, e_idx]
+
+                        # Calculate the demand for goods (when preference shock occurs)
+                        yd0 = policy_y0[m_idx, f_idx, z_idx, e_idx]
+                        yd1 = policy_y1[m_idx, f_idx, z_idx, e_idx]
+                        
+                        Yd += f_mass * (self.alpha_0 * yd0 + self.alpha_1 * yd1)
+                        
+                       
+
+
+
+                        
+
+
+
+
+
     def solve_model(self, prices=None, plot_frequency=50, report_frequency=100, tol_dist=1e-5, max_iter_dist=100000):
         if prices is None:
             prices = self.prices
