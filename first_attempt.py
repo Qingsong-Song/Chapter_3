@@ -927,18 +927,48 @@ class LagosWrightAiyagariSolver:
                         F[am_upper, af_lower, z_idx, e_idx] += g * (1 - am_wt) * af_wt
                         F[am_lower, af_upper, z_idx, e_idx] += g * am_wt * (1 - af_wt)
                         F[am_upper, af_upper, z_idx, e_idx] += g * (1 - am_wt) * (1 - af_wt)
-
+                        
 
                 for m_idx in range(self.n_m):
                     for f_idx in range(self.n_f):
-                        # Get the current mass of households in this state
-                        f_mass = F[m_idx, f_idx, z_idx, e_idx]
+                        for e_next_idx in range(self.n_e):
+                            # Get the current mass of households in this state
+                            f_mass = F[m_idx, f_idx, z_idx, e_next_idx]
 
-                        # Calculate the demand for goods (when preference shock occurs)
-                        yd0 = policy_y0[m_idx, f_idx, z_idx, e_idx]
-                        yd1 = policy_y1[m_idx, f_idx, z_idx, e_idx]
-                        
-                        Yd += f_mass * (self.alpha_0 * yd0 + self.alpha_1 * yd1)
+                            # Calculate the demand for goods (when preference shock occurs)
+                            yd0 = policy_y0[m_idx, f_idx, z_idx, e_next_idx]
+                            yd1 = policy_y1[m_idx, f_idx, z_idx, e_next_idx]
+                            
+                            Yd += f_mass * self.alpha *(self.alpha_0 * yd0 + 
+                                    self.alpha_1 * yd1) * self.P[e_idx, e_next_idx]
+
+                            # Extract policy functions
+                            b0 = policy_b0[m_idx, f_idx, z_idx, e_next_idx]
+                            b1 = policy_b1[m_idx, f_idx, z_idx, e_next_idx]
+                            b_noshock = policy_b_noshock[m_idx, f_idx, z_idx, e_next_idx]
+
+                            # Separate the positive and negative values
+                            # Bank demand (borrowing): only positive values
+                            Bd_0 = max(0.0, b0)
+                            Bd_1 = max(0.0, b1)
+                            Bd_noshock = max(0.0, b_noshock)
+
+                            # Bank supply (deposit): only negative values (multiplied by -1 to be positive)
+                            Bs_0 = -min(0.0, b0)
+                            Bs_1 = -min(0.0, b1)
+                            Bs_noshock = -min(0.0, b_noshock)
+
+                            # Calculate the demand and supply for the state b
+                            Bd += f_mass * (self.alpha * (self.alpha_0 * Bd_0 + self.alpha_1 * 
+                                        Bd_1) + (1 - self.alpha) * Bd_noshock) * self.P[e_idx, e_next_idx]
+                            Bs += f_mass * (self.alpha * (self.alpha_0 * Bs_0 + self.alpha_1 * 
+                                        Bs_1) + (1 - self.alpha) * Bs_noshock) * self.P[e_idx, e_next_idx]
+
+
+
+
+
+
                         
                        
 
