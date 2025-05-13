@@ -914,6 +914,8 @@ class LagosWrightAiyagariSolver:
 
         # Initialise asset distribution F
         F = np.zeros((self.n_m, self.n_f, self.n_z, self.n_e))
+        # Initialise market aggregates
+        excess_demand = np.zeros(3)
 
         # Initialise market agregates
         # Goods market
@@ -926,9 +928,12 @@ class LagosWrightAiyagariSolver:
         Fd = 0.0
         Fs = 0.0
 
-        # Calculate firm's profits [independent of skill z]
-        revenue = self.firm_post_rev(prices=prices)
-        profits = revenue - self.wages
+        # Call out firm's profits + Supply of government bonds
+        Fs += self.Ag0
+        Fs += self.J_total  # given prices in the initialisation (self)
+
+        # Calculate the supply of goods
+        Ys += self.emp * (self.z_grid @ self.z_dist) * self.y_star
 
 
         # Loop over all states in household distribution G
@@ -948,6 +953,9 @@ class LagosWrightAiyagariSolver:
                         F[am_upper, af_lower, z_idx, e_idx] += g * (1 - am_wt) * af_wt
                         F[am_lower, af_upper, z_idx, e_idx] += g * am_wt * (1 - af_wt)
                         F[am_upper, af_upper, z_idx, e_idx] += g * (1 - am_wt) * (1 - af_wt)
+
+                        # Calculate the demand of illiquid assets
+                        Fd += g * af
                         
 
                 for m_idx in range(self.n_m):
@@ -955,6 +963,7 @@ class LagosWrightAiyagariSolver:
                         for e_next_idx in range(self.n_e):
                             # Get the current mass of households in this state
                             f_mass = F[m_idx, f_idx, z_idx, e_next_idx]
+
 
                             # Calculate the demand for goods (when preference shock occurs)
                             yd0 = policy_y0[m_idx, f_idx, z_idx, e_next_idx]
@@ -985,7 +994,11 @@ class LagosWrightAiyagariSolver:
                             Bs += f_mass * (self.alpha * (self.alpha_0 * Bs_0 + self.alpha_1 * 
                                         Bs_1) + (1 - self.alpha) * Bs_noshock) * self.P[e_idx, e_next_idx]
 
-
+        # Calculate excess demand
+        excess_demand[0] = Yd - Ys
+        excess_demand[1] = Fd - Fs
+        excess_demand[2] = Bd - Bs
+        return excess_demand
 
 
     def solve_model(self, prices=None, plot_frequency=50, report_frequency=100, tol_dist=1e-5, max_iter_dist=100000):
@@ -1082,6 +1095,10 @@ class LagosWrightAiyagariSolver:
             raise RuntimeError("Household distribution did not converge.")
 
         total_time_dist = time.time() - dist_start
+
+        # Testing the market clearing condition
+        excess_demand = self.market_clearing(prices, G, dm_output, cm_output)
+        print(f"Excess demand: Goods = {excess_demand[0]:.2e}, Illiquid assets = {excess_demand[1]:.2e}, Bank = {excess_demand[2]:.2e}")
 
         # Plot convergence error
         plt.figure(figsize=(6, 4))
@@ -1367,7 +1384,7 @@ params = {
     }
 
 # Initialise solver with parameters
-print("Initializing LagosWrightAiyagariSolver...")
+print("Initialising LagosWrightAiyagariSolver...")
 solver = LagosWrightAiyagariSolver(params)
 
 # Set baseline prices
