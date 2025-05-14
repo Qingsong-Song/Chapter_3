@@ -111,8 +111,8 @@ class LagosWrightAiyagariSolver:
         # Initialise grids
         self.setup_grids(params)
         
-        # Initialise labor market
-        self.initialise_labor_market()
+        # # Initialise labor market
+        # self.initialise_labor_market()
 
         # Initialise value and policy functions
         self.initialise_functions()
@@ -153,12 +153,14 @@ class LagosWrightAiyagariSolver:
         # Initialise arrays using m and f as state variables
         self.W = np.zeros((self.n_a, self.n_b, self.n_z, self.n_e))
         self.V = np.zeros((self.n_m, self.n_f, self.n_z, self.n_e))
+        firm_result = self.firm_problem(self.prices)
+        wages = firm_result['wages']
         
         # Initialise W with reasonable guesses using a utility-based approach
         for e_idx, e in enumerate(self.e_grid):
             for z_idx, z in enumerate(self.z_grid):
                 # Estimate income based on skill and employment
-                income_est = self.wages[z_idx, e_idx]
+                income_est = wages[z_idx, e_idx]
                 
                 for a_idx, a in enumerate(self.a_grid):
                     for b_idx, b in enumerate(self.b_grid):
@@ -188,58 +190,58 @@ class LagosWrightAiyagariSolver:
                         self.V[m_idx, f_idx, z_idx, e_idx] = self.W[a_idx, b_idx, z_idx, e_idx]
 
 
-    def initialise_labor_market(self):
-        """
-        Initialise labor market variables and calculate steady state values.
-        """
-        py, Rl = self.prices[0], self.prices[1]
-        labor_share = self.mu  # assuming μ = labor share in production
+    # def initialise_labor_market(self):
+    #     """
+    #     Initialise labor market variables and calculate steady state values.
+    #     """
+    #     py, Rl = self.prices[0], self.prices[1]
+    #     labor_share = self.mu  # assuming μ = labor share in production
 
-        # Step 1: Optimal production per worker (independent of z)
-        self.y_star = self.κ_prime_inv(py)  # scalar
-        kappa_y = self.κ_fun(np.array([self.y_star]))[0]  # scalar
+    #     # Step 1: Optimal production per worker (independent of z)
+    #     self.y_star = self.κ_prime_inv(py)  # scalar
+    #     kappa_y = self.κ_fun(np.array([self.y_star]))[0]  # scalar
 
-        # Step 2: Firm revenue per worker for each productivity z
-        frev = self.z_grid * (1 + py * self.y_star - kappa_y)  # shape: (n_z, )
+    #     # Step 2: Firm revenue per worker for each productivity z
+    #     frev = self.z_grid * (1 + py * self.y_star - kappa_y)  # shape: (n_z, )
 
-        # Step 3: Wage per skill type (employed workers)
-        wages_em = labor_share * frev  # wage_bar[1,:] in BR
+    #     # Step 3: Wage per skill type (employed workers)
+    #     wages_em = labor_share * frev  # wage_bar[1,:] in BR
 
-        # Step 4: Per-firm profit
-        profits = frev - wages_em
+    #     # Step 4: Per-firm profit
+    #     profits = frev - wages_em
 
-        # Step 5: Firm value J(z), capitalised with Rl
-        Js = profits / (1 - (1 - self.delta) / Rl)
+    #     # Step 5: Firm value J(z), capitalised with Rl
+    #     Js = profits / (1 - (1 - self.delta) / Rl)
 
-        # Step 6: Solve for market tightness θ
-        self.market_tightness, self.job_finding_prob, self.job_finding_fill = self.solve_θ(self.prices)
-        self.emp_rate = self.job_finding_prob / (self.delta + self.job_finding_prob)
+    #     # Step 6: Solve for market tightness θ
+    #     self.market_tightness, self.job_finding_prob, self.job_finding_fill = self.solve_θ(self.prices)
+    #     self.emp_rate = self.job_finding_prob / (self.delta + self.job_finding_prob)
 
-        # Step 7: Employment rate and firm mass
-        self.emp = self.job_finding_prob / (self.delta + self.job_finding_prob)
+    #     # Step 7: Employment rate and firm mass
+    #     self.emp = self.job_finding_prob / (self.delta + self.job_finding_prob)
 
-        # Step 8: Total supply of illiquid asset (firm equity)
-        self.J_total = self.emp * np.sum(self.z_dist * Js)
+    #     # Step 8: Total supply of illiquid asset (firm equity)
+    #     self.J_total = self.emp * np.sum(self.z_dist * Js)
         
-        # Calculate wages and unemployment benefits (based on labor share)
-        self.wages_bar = np.zeros((self.n_z, self.n_e))
-        self.wages_bar[:, 1] = wages_em
-        self.wages_bar[:, 0] = self.replace_rate * wages_em  # Unemployed benefits
+    #     # Calculate wages and unemployment benefits (based on labor share)
+    #     self.wages_bar = np.zeros((self.n_z, self.n_e))
+    #     self.wages_bar[:, 1] = wages_em
+    #     self.wages_bar[:, 0] = self.replace_rate * wages_em  # Unemployed benefits
         
-        # Taxes and transfers
-        self.Ag0 = params['Ag0']  # Government bond supply
-        taulumpsum = ((1.0 / self.prices[1]) - 1.0) * self.Ag0  # Revenue from money creation
+    #     # Taxes and transfers
+    #     self.Ag0 = params['Ag0']  # Government bond supply
+    #     taulumpsum = ((1.0 / self.prices[1]) - 1.0) * self.Ag0  # Revenue from money creation
         
-        # Apply lump-sum transfer to all households using broadcasting
-        self.wages = self.wages_bar + taulumpsum
+    #     # Apply lump-sum transfer to all households using broadcasting
+    #     self.wages = self.wages_bar + taulumpsum
         
-        # Employment transition matrix: rows = current state, cols = next state
-        # [0,0] = P(unemployed → unemployed), [0,1] = P(unemployed → employed)
-        # [1,0] = P(employed → unemployed), [1,1] = P(employed → employed)
-        self.P = np.array([
-            [1 - self.job_finding_prob, self.job_finding_prob],
-            [self.delta, 1 - self.delta]
-        ])
+    #     # Employment transition matrix: rows = current state, cols = next state
+    #     # [0,0] = P(unemployed → unemployed), [0,1] = P(unemployed → employed)
+    #     # [1,0] = P(employed → unemployed), [1,1] = P(employed → employed)
+    #     self.P = np.array([
+    #         [1 - self.job_finding_prob, self.job_finding_prob],
+    #         [self.delta, 1 - self.delta]
+    #     ])
         
         
     def utility(self, c):
@@ -378,8 +380,81 @@ class LagosWrightAiyagariSolver:
         
         # Compute job finding probability & vacancy filling probability
         λ = self.job_finding(θ)
-        filling = self.job_filling(θ)
-        return θ, λ, filling
+        # filling = self.job_filling(θ)
+        return λ
+
+    def firm_problem(self, prices):
+        """
+        Compute firm-side decisions and total asset supply for the illiquid asset market.
+        This is skill-dependent and mirrors Bethune and Rocheteau's logic.
+
+        Parameters:
+        - prices: [py, Rl, i]
+        - gz: stationary skill distribution array (n_z, )
+
+        Returns:
+        - dict containing Ys, frev, wages, profits, Js, qz, J_total
+        """
+
+        # labor market stuff
+        py, Rl = prices[0], prices[1]
+        labor_share = self.mu  # assuming μ = labor share in production
+
+        # Step 1: Optimal production per worker (independent of z)
+        y_star = self.κ_prime_inv(py)  # scalar
+        kappa_y = self.κ_fun(np.array([y_star]))[0]  # scalar
+
+        # Step 2: Firm revenue per worker for each productivity z
+        frev = self.z_grid * (1 + py * y_star - kappa_y)  # shape: (n_z, )
+
+        # Step 3: Wage per skill type (employed workers)
+        wages_em = labor_share * frev  # wage_bar[1,:] in BR
+
+        # Step 4: Per-firm profit
+        profits = frev - wages_em
+
+        # Step 5: Firm value J(z), capitalised with Rl
+        Js = profits / (1 - (1 - self.delta) / Rl)
+
+        # Step 6: Solve for job finding probability
+        job_finding_prob = self.solve_θ(self.prices)
+
+        # Step 7: Employment rate
+        emp = job_finding_prob / (self.delta + job_finding_prob)
+
+        # Step 8: Total supply of illiquid asset (firm equity)
+        J_total = emp * np.sum(self.z_dist * Js)
+        
+        # Calculate wages and unemployment benefits (based on labor share)
+        wages_bar = np.zeros((self.n_z, self.n_e))
+        wages_bar[:, 1] = wages_em
+        wages_bar[:, 0] = self.replace_rate * wages_em  # Unemployed benefits
+        
+        # Taxes and transfers
+        self.Ag0 = params['Ag0']  # Government bond supply
+        taulumpsum = ((1.0 / Rl) - 1.0) * self.Ag0  # Revenue from money creation
+        
+        # Apply lump-sum transfer to all households using broadcasting
+        wages = wages_bar + taulumpsum
+        
+        # Employment transition matrix: rows = current state, cols = next state
+        # [0,0] = P(unemployed → unemployed), [0,1] = P(unemployed → employed)
+        # [1,0] = P(employed → unemployed), [1,1] = P(employed → employed)
+        P = np.array([
+            [1 - job_finding_prob, job_finding_prob],
+            [self.delta, 1 - self.delta]
+        ])
+
+        return {
+            'Ys': y_star,
+            'frev': frev,
+            'wages': wages,
+            'profits': profits,
+            'Js': Js,
+            'J_total': J_total,
+            'emp': emp,
+            'transition_matrix': P
+        }
 
     
     def solve_dm_problem_vectorised(self, W_guess, prices):
@@ -408,6 +483,10 @@ class LagosWrightAiyagariSolver:
         # Precompute y-grids for all asset levels
         y0_nb_grids = {}  # No borrowing grids for ω=0
         y1_nb_grids = {}  # No borrowing grids for ω=1
+
+        # precompute firm problem
+        firm_result = self.firm_problem(prices)
+        wages = firm_result['wages']
         
         for m_idx, a_m in enumerate(self.m_grid):
             for f_idx, a_f in enumerate(self.f_grid):
@@ -418,7 +497,7 @@ class LagosWrightAiyagariSolver:
         # Loop over employment states and skill types
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
-                income = self.wages[z_idx, e_idx]
+                income = wages[z_idx, e_idx]
                 # Vectorise for different asset levels
                 for f_idx, a_f in enumerate(self.f_grid):
                     # Case 3: No preference shock
@@ -583,10 +662,15 @@ class LagosWrightAiyagariSolver:
         policy_m = np.zeros_like(w_value)
         policy_f = np.zeros_like(w_value)
 
+        # precompute firm problem
+        firm_result = self.firm_problem(prices)
+        wages = firm_result['wages']
+        P = firm_result['transition_matrix']
+
         # Loop over employment status and skill types
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
-                income = self.wages[z_idx, e_idx]
+                income = wages[z_idx, e_idx]
                 
                 # Vectorise over current state (a, b)
                 for a_idx, a in enumerate(self.a_grid):
@@ -606,7 +690,7 @@ class LagosWrightAiyagariSolver:
                                 
                                 if c >= self.c_min:  # a small consumption level
                                     # Expected value over employment transitions
-                                    v_cont = V_guess[m_idx, f_idx, z_idx, :] @ self.P[e_idx, :]
+                                    v_cont = V_guess[m_idx, f_idx, z_idx, :] @ P[e_idx, :]
                                     w_choice[m_idx, f_idx] = self.utility(c) + self.beta * v_cont
                         
                         # Find the maximum value and corresponding indices
@@ -645,6 +729,10 @@ class LagosWrightAiyagariSolver:
         # Initialise transition matrix
         G_new = np.zeros_like(G_guess)
 
+        # Unpack transition matrix
+        firm_result = self.firm_problem(prices)
+        P = firm_result['transition_matrix']
+
         # unpack policy functions
         policy_m = cm_output['policy_m']
         policy_f = cm_output['policy_f']
@@ -676,7 +764,7 @@ class LagosWrightAiyagariSolver:
                         # Iterate over the next-period employment status
                         for e_next_idx in range(self.n_e):
                             # Transition probabilities
-                            prob = self.P[e_idx, e_next_idx]
+                            prob = P[e_idx, e_next_idx]
 
                             # unpack the consumption and borrowing policies
                             y_0 = policy_y0[m_idx, f_idx, z_idx, e_next_idx]
@@ -900,8 +988,14 @@ class LagosWrightAiyagariSolver:
               - Demand: borrowing from households;
               - Supply: deposits from households.
         """
-        # unpack prices
-        py = prices[0]
+
+        # precompute firm problem
+        firm_result = self.firm_problem(prices)
+        y_star = firm_result['Ys']
+        emp = firm_result['emp']
+        J_total = firm_result['J_total']
+        P = firm_result['transition_matrix']
+
 
         # Unpack policy functions
         policy_y0 = dm_result['policy_y0']
@@ -931,12 +1025,11 @@ class LagosWrightAiyagariSolver:
         Fs = 0.0
 
         # Call out firm's profits + Supply of government bonds
-        Fs += self.Ag0
-        Fs += self.J_total  # given prices in the initialisation (self)
+        Fd += self.Ag0
+        Fd += J_total  # given prices in the initialisation (self)
 
         # Calculate the supply of goods
-        Ys += self.emp * (self.z_grid @ self.z_dist) * self.y_star
-
+        Ys += emp * (self.z_grid @ self.z_dist) * y_star
 
         # Loop over all states in household distribution G
         for e_idx in range(self.n_e):
@@ -956,8 +1049,8 @@ class LagosWrightAiyagariSolver:
                         F[am_lower, af_upper, z_idx, e_idx] += g * am_wt * (1 - af_wt)
                         F[am_upper, af_upper, z_idx, e_idx] += g * (1 - am_wt) * (1 - af_wt)
 
-                        # Calculate the demand of illiquid assets
-                        Fd += g * af
+                        # Calculate the demand of illiquid assets (however higher return demand more)
+                        Fs += g * af
                         
 
                 for m_idx in range(self.n_m):
@@ -972,7 +1065,7 @@ class LagosWrightAiyagariSolver:
                             yd1 = policy_y1[m_idx, f_idx, z_idx, e_next_idx]
                             
                             Yd += f_mass * self.alpha *(self.alpha_0 * yd0 + 
-                                    self.alpha_1 * yd1) * self.P[e_idx, e_next_idx]
+                                    self.alpha_1 * yd1) * P[e_idx, e_next_idx]
 
                             # Extract policy functions
                             b0 = policy_b0[m_idx, f_idx, z_idx, e_next_idx]
@@ -980,21 +1073,21 @@ class LagosWrightAiyagariSolver:
                             b_noshock = policy_b_noshock[m_idx, f_idx, z_idx, e_next_idx]
 
                             # Separate the positive and negative values
-                            # Bank demand (borrowing): only positive values
-                            Bd_0 = max(0.0, b0)
-                            Bd_1 = max(0.0, b1)
-                            Bd_noshock = max(0.0, b_noshock)
+                            # Bank supply (deposit): only positive values
+                            Bs_0 = max(0.0, b0)
+                            Bs_1 = max(0.0, b1)
+                            Bs_noshock = max(0.0, b_noshock)
 
-                            # Bank supply (deposit): only negative values (multiplied by -1 to be positive)
-                            Bs_0 = -min(0.0, b0)
-                            Bs_1 = -min(0.0, b1)
-                            Bs_noshock = -min(0.0, b_noshock)
+                            # Bank demand (loans): only negative values (multiplied by -1 to be positive)
+                            Bd_0 = -min(0.0, b0)
+                            Bd_1 = -min(0.0, b1)
+                            Bd_noshock = -min(0.0, b_noshock)
 
                             # Calculate the demand and supply for the state b
                             Bd += f_mass * (self.alpha * (self.alpha_0 * Bd_0 + self.alpha_1 * 
-                                        Bd_1) + (1 - self.alpha) * Bd_noshock) * self.P[e_idx, e_next_idx]
+                                        Bd_1) + (1 - self.alpha) * Bd_noshock) * P[e_idx, e_next_idx]
                             Bs += f_mass * (self.alpha * (self.alpha_0 * Bs_0 + self.alpha_1 * 
-                                        Bs_1) + (1 - self.alpha) * Bs_noshock) * self.P[e_idx, e_next_idx]
+                                        Bs_1) + (1 - self.alpha) * Bs_noshock) * P[e_idx, e_next_idx]
 
         # Save demand
         demand_vector[0] = Yd
@@ -1482,11 +1575,13 @@ baseline_prices = np.array([
 
 # Print initial conditions
 print("\nInitial conditions:")
-print(f"  Labor market tightness: {solver.market_tightness:.4f}")
-print(f"  Job finding probability: {solver.job_finding_prob:.4f}")
-print(f"  Employment rate: {solver.emp_rate:.4f}")
-print(f"  Wages (employed, z=1): {solver.wages[1, 1]:.4f}")
-print(f"  Wages (unemployed, z=1): {solver.wages[1, 0]:.4f}")
+firm_result = solver.firm_problem(prices=baseline_prices)
+print(f"  Employment rate: {firm_result['emp']:.4f}")
+# print(f"  Labor market tightness: {solver.market_tightness:.4f}")
+# print(f"  Job finding probability: {solver.job_finding_prob:.4f}")
+# print(f"  Employment rate: {solver.emp_rate:.4f}")
+print(f"  Wages (employed, z=1): {firm_result['wages'][1, 1]:.4f}")
+print(f"  Wages (unemployed, z=1): {firm_result['wages'][1, 0]:.4f}")
 
 # Solve the model
 print("\nSolving model...")
