@@ -916,6 +916,8 @@ class LagosWrightAiyagariSolver:
         F = np.zeros((self.n_m, self.n_f, self.n_z, self.n_e))
         # Initialise market aggregates
         excess_demand = np.zeros(3)
+        demand_vector = np.zeros(3)
+        supply_vector = np.zeros(3)
 
         # Initialise market agregates
         # Goods market
@@ -994,111 +996,192 @@ class LagosWrightAiyagariSolver:
                             Bs += f_mass * (self.alpha * (self.alpha_0 * Bs_0 + self.alpha_1 * 
                                         Bs_1) + (1 - self.alpha) * Bs_noshock) * self.P[e_idx, e_next_idx]
 
+        # Save demand
+        demand_vector[0] = Yd
+        demand_vector[1] = Fd
+        demand_vector[2] = Bd
+        # Save supply
+        supply_vector[0] = Ys
+        supply_vector[1] = Fs
+        supply_vector[2] = Bs                
+
         # Calculate excess demand
         excess_demand[0] = Yd - Ys
         excess_demand[1] = Fd - Fs
         excess_demand[2] = Bd - Bs
-        return excess_demand
+
+        return excess_demand, demand_vector, supply_vector
+
+    
+    @staticmethod
+    def update_price_bisection(prices, excess_demand, price_bounds, lambda_=0.5):
+        """
+        Update prices using the bisection method based on the sign of excess demand.
+        
+        Parameters
+        ----------
+        prices : array-like
+            Current price vector [py, Rl, i].
+        excess_demand : array-like
+            Excess demand vector [goods, illiquid asset, bank].
+        price_bounds : list of tuples
+            Bounds for each price [(py_min, py_max), (Rl_min, Rl_max), (i_min, i_max)].
+        lambda_ : float
+            Weighting factor between 0 and 1.
+            
+        Returns
+        -------
+        new_prices : np.ndarray
+            Updated price vector.
+        new_bounds : list of tuples
+            Updated bounds for the next iteration.
+        """
+        new_prices = prices.copy()
+        new_bounds = price_bounds.copy()
+        
+        for i in range(len(prices)):
+            p_old = prices[i]
+            lower, upper = price_bounds[i]
+            
+            if excess_demand[i] > 0:
+                # Excess demand: increase price → new lower bound = current price
+                lower = p_old
+                p_new = lambda_ * upper + (1 - lambda_) * p_old
+            else:
+                # Excess supply: decrease price → new upper bound = current price
+                upper = p_old
+                p_new = lambda_ * lower + (1 - lambda_) * p_old
+
+            new_prices[i] = p_new
+            new_bounds[i] = (lower, upper)
+            
+        return new_prices, new_bounds
 
 
-    def solve_model(self, prices=None, plot_frequency=50, report_frequency=100, tol_dist=1e-5, max_iter_dist=100000):
+
+    def solve_model(self, prices=None, plot_frequency=50, report_frequency=100, tol_dist=1e-5, 
+                        max_iter_dist=100000, tol_market=1e-3, max_iter_market=1000, lambda_=0.5):
         if prices is None:
             prices = self.prices
 
-        # Stage 1: Value Function Iteration
-        W_current = self.W.copy()
-        iteration = 0
-        converged = False
-        start_time_vf = time.time()
+        price_bounds = [
+            (0.5, 5.0 * prices[0]),   # py bounds
+            (0.5, 5.0 * prices[1]),   # Rl bounds
+            (0.0, 10.0 * prices[2])    # i bounds
+        ]
 
-        os.makedirs('exports', exist_ok=True)
+        market_iter = 0
+        while market_iter < max_iter_market:
+            market_iter += 1
 
-        vf_history = {
-            'max_diff': [],
-            'mean_diff': [],
-            'iteration_time': []
-        }
+            # Stage 1: Value Function Iteration
+            W_current = self.W.copy()
+            iteration = 0
+            converged = False
+            start_time_vf = time.time()
 
-        while iteration < self.max_iter and not converged:
-            iter_start = time.time()
-            results = self.solver_iteration(prices, W_current)
-            W_current = results['W']
-            max_diff = results['max_diff']
-            mean_diff = results['mean_diff']
-            converged = results['converged']
-            iter_time = time.time() - iter_start
+            os.makedirs('exports', exist_ok=True)
 
-            vf_history['max_diff'].append(max_diff)
-            vf_history['mean_diff'].append(mean_diff)
-            vf_history['iteration_time'].append(iter_time)
+            vf_history = {
+                'max_diff': [],
+                'mean_diff': [],
+                'iteration_time': []
+            }
 
-            iteration += 1
-            if iteration % report_frequency == 0 or converged:
-                print(f"[VF] Iter {iteration}: Max diff = {max_diff:.2e}, Mean diff = {mean_diff:.2e}, Time = {iter_time:.2f}s")
+            while iteration < self.max_iter and not converged:
+                iter_start = time.time()
+                results = self.solver_iteration(prices, W_current)
+                W_current = results['W']
+                max_diff = results['max_diff']
+                mean_diff = results['mean_diff']
+                converged = results['converged']
+                iter_time = time.time() - iter_start
 
-            if iteration % plot_frequency == 0 or converged:
-                self.plot_functions(iteration, results)
+                vf_history['max_diff'].append(max_diff)
+                vf_history['mean_diff'].append(mean_diff)
+                vf_history['iteration_time'].append(iter_time)
 
-        total_time_vf = time.time() - start_time_vf
-        if converged:
-            print(f"\nValue function converged in {iteration} iterations, {total_time_vf:.2f} seconds.")
-        else:
-            print(f"\nValue function did not converge in {self.max_iter} iterations, {total_time_vf:.2f} seconds.")
+                iteration += 1
+                if iteration % report_frequency == 0 or converged:
+                    print(f"[VF] Iter {iteration}: Max diff = {max_diff:.2e}, Mean diff = {mean_diff:.2e}, Time = {iter_time:.2f}s")
 
-        self.W = W_current
-        self.V = results['V']
+                if iteration % plot_frequency == 0 or converged:
+                    self.plot_functions(iteration, results)
 
-        print("Exporting final V and W to Excel...")
-        self.export_4d_to_excel(self.V, 'exports/V_final.xlsx', sheet_name='ValueFunction')
-        self.export_4d_to_excel(self.W, 'exports/W_final.xlsx', sheet_name='PolicyFunction')
-        print("Export complete.")
+            total_time_vf = time.time() - start_time_vf
+            if converged:
+                print(f"\nValue function converged in {iteration} iterations, {total_time_vf:.2f} seconds.")
+            else:
+                print(f"\nValue function did not converge in {self.max_iter} iterations, {total_time_vf:.2f} seconds.")
 
-        # Stage 2: Stationary Distribution Iteration
-        print("\nStarting household distribution iteration...")
-        dist_start = time.time()
-        shape = (len(self.a_grid), len(self.b_grid), self.n_z, self.n_e)
-        G = np.ones(shape) / np.prod(shape)
-        dis_history = {
-            'max_diff': [],
-            'iteration_time': []
-        }
+            self.W = W_current
+            self.V = results['V']
 
-        cm_output = {
-            'policy_m': results['cm_results']['policy_m'],
-            'policy_f': results['cm_results']['policy_f']
-        }
+            print("Exporting final V and W to Excel...")
+            self.export_4d_to_excel(self.V, 'exports/V_final.xlsx', sheet_name='ValueFunction')
+            self.export_4d_to_excel(self.W, 'exports/W_final.xlsx', sheet_name='PolicyFunction')
+            print("Export complete.")
 
-        dm_output = {
-            'policy_y0': results['dm_results']['policy_y0'],
-            'policy_y1': results['dm_results']['policy_y1'],
-            'policy_b0': results['dm_results']['policy_b0'],
-            'policy_b1': results['dm_results']['policy_b1'],
-            'policy_b_noshock': results['dm_results']['policy_b_noshock']
-        }
+            # Stage 2: Stationary Distribution Iteration
+            print("\nStarting household distribution iteration...")
+            dist_start = time.time()
+            shape = (len(self.a_grid), len(self.b_grid), self.n_z, self.n_e)
+            G = np.ones(shape) / np.prod(shape)
+            dis_history = {
+                'max_diff': [],
+                'iteration_time': []
+            }
 
-        for dist_iter in range(max_iter_dist):
-            G_new = self.household_transition(G, prices, cm_output, dm_output)
-            error = np.max(np.abs(G_new - G))
-            dis_history['max_diff'].append(error)
-            iter_time = time.time() - dist_start
-            dis_history['iteration_time'].append(iter_time)
+            cm_output = {
+                'policy_m': results['cm_results']['policy_m'],
+                'policy_f': results['cm_results']['policy_f']
+            }
 
-            if dist_iter % report_frequency == 0 or error < tol_dist:
-                print(f"[DIST] Iter {dist_iter+1}: max error = {error:.2e}")
+            dm_output = {
+                'policy_y0': results['dm_results']['policy_y0'],
+                'policy_y1': results['dm_results']['policy_y1'],
+                'policy_b0': results['dm_results']['policy_b0'],
+                'policy_b1': results['dm_results']['policy_b1'],
+                'policy_b_noshock': results['dm_results']['policy_b_noshock']
+            }
 
-            if error < tol_dist:
-                print(f"\nDistribution converged in {dist_iter+1} iterations.")
+            for dist_iter in range(max_iter_dist):
+                G_new = self.household_transition(G, prices, cm_output, dm_output)
+                error = np.max(np.abs(G_new - G))
+                dis_history['max_diff'].append(error)
+                iter_time = time.time() - dist_start
+                dis_history['iteration_time'].append(iter_time)
+
+                if dist_iter % report_frequency == 0 or error < tol_dist:
+                    print(f"[DIST] Iter {dist_iter+1}: max error = {error:.2e}")
+
+                if error < tol_dist:
+                    print(f"\nDistribution converged in {dist_iter+1} iterations.")
+                    break
+
+                G = G_new.copy()
+            else:
+                raise RuntimeError("Household distribution did not converge.")
+
+            total_time_dist = time.time() - dist_start
+
+            # Market clearing evaluation
+            excess_demand, demand_vector, supply_vector = self.market_clearing(prices, G, dm_output, cm_output)
+            print(f"Excess demand: Goods = {excess_demand[0]:.2e}, Illiquid assets = {excess_demand[1]:.2e}, Bank = {excess_demand[2]:.2e}")
+            print(f"Demand: Goods = {demand_vector[0]:.2e}, Illiquid assets = {demand_vector[1]:.2e}, Bank = {demand_vector[2]:.2e}")
+            print(f"Supply: Goods = {supply_vector[0]:.2e}, Illiquid assets = {supply_vector[1]:.2e}, Bank = {supply_vector[2]:.2e}")
+
+            # Check convergence across markets
+            if np.min(np.abs(excess_demand)) < tol_market:
+                print("\nMarket clearing achieved.")
                 break
 
-            G = G_new.copy()
+            # Price update using bisection
+            prices, price_bounds = self.update_price_bisection(prices, excess_demand, price_bounds, lambda_=lambda_)
+            print(f"Updated prices: py = {prices[0]:.4f}, Rl = {prices[1]:.4f}, i = {prices[2]:.4f}\n")
+
         else:
-            raise RuntimeError("Household distribution did not converge.")
-
-        total_time_dist = time.time() - dist_start
-
-        # Testing the market clearing condition
-        excess_demand = self.market_clearing(prices, G, dm_output, cm_output)
-        print(f"Excess demand: Goods = {excess_demand[0]:.2e}, Illiquid assets = {excess_demand[1]:.2e}, Bank = {excess_demand[2]:.2e}")
+            raise RuntimeError("Equilibrium prices did not converge after maximum iterations.")
 
         # Plot convergence error
         plt.figure(figsize=(6, 4))
@@ -1116,6 +1199,8 @@ class LagosWrightAiyagariSolver:
             'W': self.W,
             'V': self.V,
             'G': G_new,
+            'prices': prices,
+            'excess_demand': excess_demand,
             'converged': converged,
             'iterations': iteration,
             'iterations_distribution': dist_iter + 1,
@@ -1125,6 +1210,7 @@ class LagosWrightAiyagariSolver:
             'history_value': vf_history,
             'history_distribution': dis_history
         }
+
     
     @staticmethod
     def export_4d_to_excel(array, filename, sheet_name='Sheet1'):
