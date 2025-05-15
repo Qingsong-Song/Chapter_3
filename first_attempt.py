@@ -111,9 +111,6 @@ class LagosWrightAiyagariSolver:
         # Initialise grids
         self.setup_grids(params)
         
-        # # Initialise labor market
-        # self.initialise_labor_market()
-
         # Initialise value and policy functions
         self.initialise_functions()
         
@@ -189,60 +186,6 @@ class LagosWrightAiyagariSolver:
                         # Map to V
                         self.V[m_idx, f_idx, z_idx, e_idx] = self.W[a_idx, b_idx, z_idx, e_idx]
 
-
-    # def initialise_labor_market(self):
-    #     """
-    #     Initialise labor market variables and calculate steady state values.
-    #     """
-    #     py, Rl = self.prices[0], self.prices[1]
-    #     labor_share = self.mu  # assuming μ = labor share in production
-
-    #     # Step 1: Optimal production per worker (independent of z)
-    #     self.y_star = self.κ_prime_inv(py)  # scalar
-    #     kappa_y = self.κ_fun(np.array([self.y_star]))[0]  # scalar
-
-    #     # Step 2: Firm revenue per worker for each productivity z
-    #     frev = self.z_grid * (1 + py * self.y_star - kappa_y)  # shape: (n_z, )
-
-    #     # Step 3: Wage per skill type (employed workers)
-    #     wages_em = labor_share * frev  # wage_bar[1,:] in BR
-
-    #     # Step 4: Per-firm profit
-    #     profits = frev - wages_em
-
-    #     # Step 5: Firm value J(z), capitalised with Rl
-    #     Js = profits / (1 - (1 - self.delta) / Rl)
-
-    #     # Step 6: Solve for market tightness θ
-    #     self.market_tightness, self.job_finding_prob, self.job_finding_fill = self.solve_θ(self.prices)
-    #     self.emp_rate = self.job_finding_prob / (self.delta + self.job_finding_prob)
-
-    #     # Step 7: Employment rate and firm mass
-    #     self.emp = self.job_finding_prob / (self.delta + self.job_finding_prob)
-
-    #     # Step 8: Total supply of illiquid asset (firm equity)
-    #     self.J_total = self.emp * np.sum(self.z_dist * Js)
-        
-    #     # Calculate wages and unemployment benefits (based on labor share)
-    #     self.wages_bar = np.zeros((self.n_z, self.n_e))
-    #     self.wages_bar[:, 1] = wages_em
-    #     self.wages_bar[:, 0] = self.replace_rate * wages_em  # Unemployed benefits
-        
-    #     # Taxes and transfers
-    #     self.Ag0 = params['Ag0']  # Government bond supply
-    #     taulumpsum = ((1.0 / self.prices[1]) - 1.0) * self.Ag0  # Revenue from money creation
-        
-    #     # Apply lump-sum transfer to all households using broadcasting
-    #     self.wages = self.wages_bar + taulumpsum
-        
-    #     # Employment transition matrix: rows = current state, cols = next state
-    #     # [0,0] = P(unemployed → unemployed), [0,1] = P(unemployed → employed)
-    #     # [1,0] = P(employed → unemployed), [1,1] = P(employed → employed)
-    #     self.P = np.array([
-    #         [1 - self.job_finding_prob, self.job_finding_prob],
-    #         [self.delta, 1 - self.delta]
-    #     ])
-        
         
     def utility(self, c):
         """
@@ -1024,9 +967,9 @@ class LagosWrightAiyagariSolver:
         Fd = 0.0
         Fs = 0.0
 
-        # Call out firm's profits + Supply of government bonds
-        Fd += self.Ag0
-        Fd += J_total  # given prices in the initialisation (self)
+        # Call out firm's profits + Supply of government bonds (However for the sign change we code it as demand)
+        Fs += self.Ag0
+        Fs += J_total  # given prices in the initialisation (self)
 
         # Calculate the supply of goods
         Ys += emp * (self.z_grid @ self.z_dist) * y_star
@@ -1050,7 +993,7 @@ class LagosWrightAiyagariSolver:
                         F[am_upper, af_upper, z_idx, e_idx] += g * (1 - am_wt) * (1 - af_wt)
 
                         # Calculate the demand of illiquid assets (however higher return demand more)
-                        Fs += g * af
+                        Fd += g * af
                         
 
                 for m_idx in range(self.n_m):
@@ -1058,7 +1001,6 @@ class LagosWrightAiyagariSolver:
                         for e_next_idx in range(self.n_e):
                             # Get the current mass of households in this state
                             f_mass = F[m_idx, f_idx, z_idx, e_next_idx]
-
 
                             # Calculate the demand for goods (when preference shock occurs)
                             yd0 = policy_y0[m_idx, f_idx, z_idx, e_next_idx]
@@ -1100,7 +1042,7 @@ class LagosWrightAiyagariSolver:
 
         # Calculate excess demand
         excess_demand[0] = Yd - Ys
-        excess_demand[1] = Fd - Fs
+        excess_demand[1] = Fs - Fd   # Rl increases, demand more
         excess_demand[2] = Bd - Bs
 
         return excess_demand, demand_vector, supply_vector
@@ -1166,6 +1108,7 @@ class LagosWrightAiyagariSolver:
         market_iter = 0
         while market_iter < max_iter_market:
             market_iter += 1
+            print(f"\nMarket clearing  {market_iter} iterations.")
 
             # Stage 1: Value Function Iteration
             W_current = self.W.copy()
@@ -1211,8 +1154,8 @@ class LagosWrightAiyagariSolver:
             self.V = results['V']
 
             print("Exporting final V and W to Excel...")
-            self.export_4d_to_excel(self.V, 'exports/V_final.xlsx', sheet_name='ValueFunction')
-            self.export_4d_to_excel(self.W, 'exports/W_final.xlsx', sheet_name='PolicyFunction')
+            self.export_4d_to_excel(self.V, 'exports/V_final.xlsx', sheet_name='ValueVFunction')
+            self.export_4d_to_excel(self.W, 'exports/W_final.xlsx', sheet_name='ValueWFunction')
             print("Export complete.")
 
             # Stage 2: Stationary Distribution Iteration
@@ -1238,6 +1181,16 @@ class LagosWrightAiyagariSolver:
                 'policy_b_noshock': results['dm_results']['policy_b_noshock']
             }
 
+            print("Exporting Policy functions Excel...")
+            self.export_4d_to_excel(cm_output['policy_m'], 'exports/policy_m.xlsx', sheet_name='MoneyHolding')
+            self.export_4d_to_excel(cm_output['policy_f'], 'exports/policy_f.xlsx', sheet_name='StockHolding')
+            self.export_4d_to_excel(dm_output['policy_y0'], 'exports/policy_y0.xlsx', sheet_name='Consumption0')
+            self.export_4d_to_excel(dm_output['policy_y1'], 'exports/policy_y1.xlsx', sheet_name='Consumption1')
+            self.export_4d_to_excel(dm_output['policy_b0'], 'exports/policy_b0.xlsx', sheet_name='Borrowing0')
+            self.export_4d_to_excel(dm_output['policy_b1'], 'exports/policy_b1.xlsx', sheet_name='Borrowing1')
+            self.export_4d_to_excel(dm_output['policy_b_noshock'], 'exports/policy_b_noshock.xlsx', sheet_name='BorrowingNoshock')
+            print("Export complete.")
+
             for dist_iter in range(max_iter_dist):
                 G_new = self.household_transition(G, prices, cm_output, dm_output)
                 error = np.max(np.abs(G_new - G))
@@ -1258,6 +1211,10 @@ class LagosWrightAiyagariSolver:
 
             total_time_dist = time.time() - dist_start
 
+            print("Exporting Distribution to Excel...")
+            self.export_4d_to_excel(G, 'exports/G_final.xlsx', sheet_name='HouseholdDistribution')
+            print("Export complete.")
+
             # Market clearing evaluation
             excess_demand, demand_vector, supply_vector = self.market_clearing(prices, G, dm_output, cm_output)
             print(f"Excess demand: Goods = {excess_demand[0]:.2e}, Illiquid assets = {excess_demand[1]:.2e}, Bank = {excess_demand[2]:.2e}")
@@ -1265,7 +1222,7 @@ class LagosWrightAiyagariSolver:
             print(f"Supply: Goods = {supply_vector[0]:.2e}, Illiquid assets = {supply_vector[1]:.2e}, Bank = {supply_vector[2]:.2e}")
 
             # Check convergence across markets
-            if np.min(np.abs(excess_demand)) < tol_market:
+            if np.max(np.abs(excess_demand)) < tol_market:
                 print("\nMarket clearing achieved.")
                 break
 
@@ -1516,7 +1473,7 @@ class LagosWrightAiyagariSolver:
 params = {
         # Preference parameters
         'beta': 0.96,      # Discount factor
-        'alpha': 0.075,    # Probability of DM consumption opportunity
+        'alpha': 0.075,    # Probability of DM consumption opportunity (tested 0.3, originally works but dies overtime)
         'alpha_1': 0.06,   # Probability of accepting both money and assets
         'gamma': 1.5,      # Risk aversion parameter
         'Psi': 2.2,        # DM utility scaling parameter
