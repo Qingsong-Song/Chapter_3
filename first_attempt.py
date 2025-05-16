@@ -652,6 +652,46 @@ class LagosWrightAiyagariSolver:
             'policy_f': policy_f,
         }
 
+    def solver_iteration(self, prices, W_guess):
+        """
+        Performs one iteration of the solution algorithm:
+        1. Solve DM problem given W_guess to get V
+        2. Solve CM problem given V to get updated W
+        
+        :param prices: Current prices [py, Rl, i]
+        :param W_guess: Initial guess for value function, uses self.W if None
+        :return: Updated value functions, policy functions, and convergence information
+        """
+        # Use current W guess
+        W_guess = self.W
+            
+        # Step 1: Solve DM problem to get V
+        dm_results = self.solve_dm_problem_vectorised(W_guess, prices)
+        V = dm_results['V_dm']
+        
+        # Step 2: Solve CM problem to get updated W
+        cm_results = self.solve_cm_problem_vectorised(V, prices)
+        W_updated = cm_results['W']
+        
+        # Calculate convergence metrics
+        diff = np.abs(W_updated - W_guess)
+        max_diff = np.max(diff)
+        mean_diff = np.mean(diff)
+        
+        # Store current value functions for history
+        self.value_history['W'].append(W_updated.copy())
+        self.value_history['V'].append(V.copy())
+        
+        return {
+            'W': W_updated,
+            'V': V,
+            'dm_results': dm_results,
+            'cm_results': cm_results,
+            'max_diff': max_diff,
+            'mean_diff': mean_diff,
+            'converged': max_diff < self.tol
+        }
+
 
     def household_transition(self, G_guess, prices, cm_output, dm_output):
         """
@@ -701,8 +741,8 @@ class LagosWrightAiyagariSolver:
                         f_prime = policy_f[a_idx, b_idx, z_idx, e_idx]
                         total_asset = m_prime + f_prime
                         # No need to calculate the weights since it came from the grid exactly
-                        m_idx = find_nearest_index(self.m_grid, m_prime)
-                        f_idx = find_nearest_index(self.f_grid, f_prime)
+                        m_lower_idx, m_upper_idx, m_wi = find_closest_indices(self.m_grid, m_prime)
+                        f_lower_idx, f_upper_idx, f_wi = find_closest_indices(self.f_grid, f_prime)
                         
                         # Iterate over the next-period employment status
                         for e_next_idx in range(self.n_e):
@@ -710,11 +750,26 @@ class LagosWrightAiyagariSolver:
                             prob = P[e_idx, e_next_idx]
 
                             # unpack the consumption and borrowing policies
-                            y_0 = policy_y0[m_idx, f_idx, z_idx, e_next_idx]
-                            b_0 = policy_b0[m_idx, f_idx, z_idx, e_next_idx]
-                            y_1 = policy_y1[m_idx, f_idx, z_idx, e_next_idx]
-                            b_1 = policy_b1[m_idx, f_idx, z_idx, e_next_idx]
-                            b_noshock = policy_b_noshock[m_idx, f_idx, z_idx, e_next_idx]
+                            y_0 = (m_wi * f_wi * policy_y0[m_lower_idx, f_lower_idx, z_idx, e_next_idx] +
+                                  (1 - m_wi) * f_wi * policy_y0[m_upper_idx, f_lower_idx, z_idx, e_next_idx] +
+                                  m_wi * (1 - f_wi) * policy_y0[m_lower_idx, f_upper_idx, z_idx, e_next_idx] +
+                                  (1 - m_wi) * (1 - f_wi) * policy_y0[m_upper_idx, f_upper_idx, z_idx, e_next_idx])
+                            b_0 = (m_wi * f_wi * policy_b0[m_lower_idx, f_lower_idx, z_idx, e_next_idx] +
+                                  (1 - m_wi) * f_wi * policy_b0[m_upper_idx, f_lower_idx, z_idx, e_next_idx] +
+                                  m_wi * (1 - f_wi) * policy_b0[m_lower_idx, f_upper_idx, z_idx, e_next_idx] +
+                                  (1 - m_wi) * (1 - f_wi) * policy_b0[m_upper_idx, f_upper_idx, z_idx, e_next_idx])
+                            y_1 = (m_wi * f_wi * policy_y1[m_lower_idx, f_lower_idx, z_idx, e_next_idx] +
+                                  (1 - m_wi) * f_wi * policy_y1[m_upper_idx, f_lower_idx, z_idx, e_next_idx] +
+                                  m_wi * (1 - f_wi) * policy_y1[m_lower_idx, f_upper_idx, z_idx, e_next_idx] +
+                                  (1 - m_wi) * (1 - f_wi) * policy_y1[m_upper_idx, f_upper_idx, z_idx, e_next_idx])
+                            b_1 = (m_wi * f_wi * policy_b1[m_lower_idx, f_lower_idx, z_idx, e_next_idx] +
+                                  (1 - m_wi) * f_wi * policy_b1[m_upper_idx, f_lower_idx, z_idx, e_next_idx] +
+                                  m_wi * (1 - f_wi) * policy_b1[m_lower_idx, f_upper_idx, z_idx, e_next_idx] +
+                                  (1 - m_wi) * (1 - f_wi) * policy_b1[m_upper_idx, f_upper_idx, z_idx, e_next_idx])
+                            b_noshock = (m_wi * f_wi * policy_b_noshock[m_lower_idx, f_lower_idx, z_idx, e_next_idx] +
+                                  (1 - m_wi) * f_wi * policy_b_noshock[m_upper_idx, f_lower_idx, z_idx, e_next_idx] +
+                                  m_wi * (1 - f_wi) * policy_b_noshock[m_lower_idx, f_upper_idx, z_idx, e_next_idx] +
+                                  (1 - m_wi) * (1 - f_wi) * policy_b_noshock[m_upper_idx, f_upper_idx, z_idx, e_next_idx])
 
                             # Calculate the next state
                             # 1: No shock (ϵ = 0)
@@ -876,51 +931,11 @@ class LagosWrightAiyagariSolver:
                 v01 * wx * (1 - wy) + 
                 v11 * (1 - wx) * (1 - wy))
 
-    def solver_iteration(self, prices, W_guess=None):
-        """
-        Performs one iteration of the solution algorithm:
-        1. Solve DM problem given W_guess to get V
-        2. Solve CM problem given V to get updated W
-        
-        :param prices: Current prices [py, Rl, i]
-        :param W_guess: Initial guess for value function, uses self.W if None
-        :return: Updated value functions, policy functions, and convergence information
-        """
-        # Use current W if no guess provided
-        if W_guess is None:
-            W_guess = self.W
-            
-        # Step 1: Solve DM problem to get V
-        dm_results = self.solve_dm_problem_vectorised(W_guess, prices)
-        V = dm_results['V_dm']
-        
-        # Step 2: Solve CM problem to get updated W
-        cm_results = self.solve_cm_problem_vectorised(V, prices)
-        W_updated = cm_results['W']
-        
-        # Calculate convergence metrics
-        diff = np.abs(W_updated - W_guess)
-        max_diff = np.max(diff)
-        mean_diff = np.mean(diff)
-        
-        # Store current value functions for history
-        self.value_history['W'].append(W_updated.copy())
-        self.value_history['V'].append(V.copy())
-        
-        return {
-            'W': W_updated,
-            'V': V,
-            'dm_results': dm_results,
-            'cm_results': cm_results,
-            'max_diff': max_diff,
-            'mean_diff': mean_diff,
-            'converged': max_diff < self.tol
-        }
-
+    
 
     def market_clearing(self, prices, G, dm_result, cm_result):
         """
-        Market clearing condition: 
+        Calculate the demand and supply for each goods: 
             Goods market: 
               - Demand: y_omega + y [am, af, z, e] in the DM;
               - Supply: employment * production, integreated across different z.
@@ -1469,7 +1484,7 @@ class LagosWrightAiyagariSolver:
         plt.savefig(f'plots/portfolio_composition_iter_{iteration}.png')
         plt.close()
     
-
+# Setup parameter values + initial guess of prices
 params = {
         # Preference parameters
         'beta': 0.96,      # Discount factor
@@ -1479,8 +1494,8 @@ params = {
         'Psi': 2.2,        # DM utility scaling parameter
         
         # Production and labor market parameters
-        'psi': 0.28,       # Matching function elasticity
-        'zeta': 0.75,      # Worker bargaining power
+        'psi': 0.12,       # DM utility power (test: original = 0.28 in the BR model)
+        'zeta': 0.75,      # Matching function parameter
         'nu': 1.6,         # Labor supply elasticity
         'mu': 0.7,         # Matching efficiency
         'delta': 0.035,    # Job separation rate
