@@ -622,17 +622,76 @@ class LagosWrightAiyagariSolver:
             'policy_b_noshock': policy_b_noshock
         }
 
+    # @track_time
+    # def solve_cm_problem_vectorised(self, V_guess, prices):
+    #     """
+    #     BLOCK 1: Solve the CM problem.
+    #     Solve the policy functions for the CM.
+    #     Input: 
+    #         V_guess: Initial guess for value function V.
+    #         prices: Current prices [py, Rl, i]
+    #     Output:
+    #         Updated value function W and policy functions.
+    #     """
+    #     # Unpack prices
+    #     py = prices[0]
+    #     Rl = prices[1]
+    #     i = prices[2]
+
+    #     # Initialise value and policy functions
+    #     w_value = np.zeros((self.n_a, self.n_b, self.n_z, self.n_e))
+    #     policy_m = np.zeros_like(w_value)
+    #     policy_f = np.zeros_like(w_value)
+
+    #     # precompute firm problem
+    #     firm_result = self.firm_problem(prices)
+    #     wages = firm_result['wages']
+    #     P = firm_result['transition_matrix']
+
+    #     # Loop over employment status and skill types
+    #     for e_idx in range(self.n_e):
+    #         for z_idx in range(self.n_z):
+    #             income = wages[z_idx, e_idx]
+
+    #             # Vectorise over current state (a, b)
+    #             for a_idx, a in enumerate(self.a_grid):
+    #                 for b_idx, b in enumerate(self.b_grid):
+    #                     # Calculate total resources available (RHS of the budget constraint)
+    #                     total_resources = a + (1 + i) * b + income
+
+    #                     # Initialise choice array
+    #                     w_choice = np.full((self.n_m, self.n_f), -1e3)  # Default to a very negative
+
+    #                     # to do: this part can be precomputed
+    #                     # Calculate continuation values for valid portfolio combinations only
+    #                     for m_idx, m_prime in enumerate(self.m_grid):
+    #                         for f_idx, f_prime in enumerate(self.f_grid):
+
+    #                             # Calculate consumption
+    #                             c = total_resources - f_prime / Rl - m_prime / self.Rm
+
+    #                             if c >= self.c_min:  # a small consumption level
+    #                                 # Expected value over employment transitions
+    #                                 v_cont = V_guess[m_idx, f_idx, z_idx, :] @ P[e_idx, :]
+    #                                 w_choice[m_idx, f_idx] = self.utility(c) + self.beta * v_cont
+
+    #                     # Find the maximum value and corresponding indices
+    #                     max_val = np.max(w_choice)
+    #                     max_indices = np.unravel_index(np.argmax(w_choice), w_choice.shape)
+
+    #                     # Store the maximum value and corresponding policies
+    #                     w_value[a_idx, b_idx, z_idx, e_idx] = max_val
+    #                     policy_m[a_idx, b_idx, z_idx, e_idx] = self.m_grid[max_indices[0]]
+    #                     policy_f[a_idx, b_idx, z_idx, e_idx] = self.f_grid[max_indices[1]]
+    #     # Return updated value function and policy functions
+    #     return {
+    #         'W': w_value,
+    #         'policy_m': policy_m,
+    #         'policy_f': policy_f,
+    #     }
+    
     @track_time
     def solve_cm_problem_vectorised(self, V_guess, prices):
-        """
-        BLOCK 1: Solve the CM problem.
-        Solve the policy functions for the CM.
-        Input: 
-            V_guess: Initial guess for value function V.
-            prices: Current prices [py, Rl, i]
-        Output:
-            Updated value function W and policy functions.
-        """
         # Unpack prices
         py = prices[0]
         Rl = prices[1]
@@ -643,46 +702,56 @@ class LagosWrightAiyagariSolver:
         policy_m = np.zeros_like(w_value)
         policy_f = np.zeros_like(w_value)
 
-        # precompute firm problem
+        # Precompute firm problem
         firm_result = self.firm_problem(prices)
         wages = firm_result['wages']
         P = firm_result['transition_matrix']
 
+        # Precompute portfolio costs
+        m_grid_reshaped = self.m_grid.reshape(-1, 1)  # (n_m, 1)
+        f_grid_reshaped = self.f_grid.reshape(1, -1)  # (1, n_f)
+        portfolio_costs = m_grid_reshaped / self.Rm + f_grid_reshaped / Rl  # (n_m, n_f)
+
         # Loop over employment status and skill types
         for e_idx in range(self.n_e):
+            # Reshape transition probabilities for correct broadcasting
+            P_reshaped = P[e_idx, :].reshape(1, 1, -1)  # (1, 1, n_e)
+            
             for z_idx in range(self.n_z):
                 income = wages[z_idx, e_idx]
-
+                
+                # Get value function slice for current z_idx
+                V_slice = V_guess[:, :, z_idx, :]  # (n_m, n_f, n_e)
+                
+                # Calculate expected continuation value
+                cont_values = np.sum(V_slice * P_reshaped, axis=2)  # (n_m, n_f)
+                
                 # Vectorise over current state (a, b)
                 for a_idx, a in enumerate(self.a_grid):
                     for b_idx, b in enumerate(self.b_grid):
-                        # Calculate total resources available (RHS of the budget constraint)
+                        # Calculate total resources available
                         total_resources = a + (1 + i) * b + income
-
-                        # Initialise choice array
-                        w_choice = np.full((self.n_m, self.n_f), -1e3)  # Default to a very negative
-
-                        # to do: this part can be precomputed
-                        # Calculate continuation values for valid portfolio combinations only
-                        for m_idx, m_prime in enumerate(self.m_grid):
-                            for f_idx, f_prime in enumerate(self.f_grid):
-
-                                # Calculate consumption
-                                c = total_resources - f_prime / Rl - m_prime / self.Rm
-
-                                if c >= self.c_min:  # a small consumption level
-                                    # Expected value over employment transitions
-                                    v_cont = V_guess[m_idx, f_idx, z_idx, :] @ P[e_idx, :]
-                                    w_choice[m_idx, f_idx] = self.utility(c) + self.beta * v_cont
-
+                        
+                        # Calculate consumption for all portfolio combinations
+                        c_values = total_resources - portfolio_costs  # (n_m, n_f)
+                        
+                        # Create mask for valid consumption levels
+                        valid_c = c_values >= self.c_min  # (n_m, n_f)
+                        
+                        # Calculate utility and continuation value where consumption is valid
+                        w_choice = np.where(valid_c, 
+                                        self.utility(c_values) + self.beta * cont_values,
+                                        -1e3)  # (n_m, n_f)
+                        
                         # Find the maximum value and corresponding indices
                         max_val = np.max(w_choice)
                         max_indices = np.unravel_index(np.argmax(w_choice), w_choice.shape)
-
+                        
                         # Store the maximum value and corresponding policies
                         w_value[a_idx, b_idx, z_idx, e_idx] = max_val
                         policy_m[a_idx, b_idx, z_idx, e_idx] = self.m_grid[max_indices[0]]
                         policy_f[a_idx, b_idx, z_idx, e_idx] = self.f_grid[max_indices[1]]
+        
         # Return updated value function and policy functions
         return {
             'W': w_value,
