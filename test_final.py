@@ -271,7 +271,7 @@ class LagosWrightAiyagariSolver:
         q = 1 + py * y_tilda - self.κ_fun(y_tilda)
         return q
 
-    @track_time
+    
     def firm_post_rev(self, prices):
         """
         Calculates the productivity-normalised value of a filled job.
@@ -355,7 +355,7 @@ class LagosWrightAiyagariSolver:
         # filling = self.job_filling(θ)
         return λ
 
-    @track_time
+    
     def firm_problem(self, prices):
         """
         Compute firm-side decisions and total asset supply for the illiquid asset market.
@@ -464,16 +464,15 @@ class LagosWrightAiyagariSolver:
         firm_result = self.firm_problem(prices)
         wages = firm_result['wages']
         
-        start_time = time.time()
+        
         for m_idx, a_m in enumerate(self.m_grid):
             for f_idx, a_f in enumerate(self.f_grid):
                 a = min(a_m + a_f, self.a_max)  # Total assets
                 y1_nb_grids[(m_idx, f_idx)] = np.linspace(0, a/py, self.ny)  # Can use all assets when ω=1
                 y0_nb_grids[(m_idx, f_idx)] = np.linspace(0, a_m/py, self.ny)
-        print(f"Part 1 loop in dm took {time.time() - start_time:.4f} seconds.")
+        
         
         # Loop over employment states and skill types
-        start_time = time.time()
         for e_idx in range(self.n_e):
             for z_idx in range(self.n_z):
                 income = wages[z_idx, e_idx]
@@ -608,7 +607,7 @@ class LagosWrightAiyagariSolver:
                             policy_b1[m_idx, f_idx, z_idx, e_idx] = d1[max_idx]
                             V1[m_idx, f_idx, z_idx, e_idx] = v1_nb[max_idx]
 
-        print(f"Part 2 loop in dm took {time.time() - start_time:.4f} seconds.")
+        
         # Calculate expected value with correct probability weighting
         V_dm = self.alpha * (self.alpha_0 * V0 + self.alpha_1 * V1) + (1 - self.alpha) * V_noshock
 
@@ -625,7 +624,7 @@ class LagosWrightAiyagariSolver:
             'policy_b_noshock': policy_b_noshock
         }
     
-    @track_time
+    
     def solve_cm_problem_vectorised(self, V_guess, prices):
         """
          BLOCK 1: Solve the CM problem.
@@ -757,7 +756,7 @@ class LagosWrightAiyagariSolver:
         }
 
 
-    @track_time
+    
     def household_transition(self, G_guess, prices, cm_output, dm_output):
         """
         BLOCK 2: Household Transition
@@ -975,9 +974,7 @@ class LagosWrightAiyagariSolver:
                 v11 * (1 - wx) * (1 - wy))
 
     
-
-
-    @track_time
+    
     def market_clearing(self, prices, G, dm_result, cm_result):
         """
         BLOCK 3: Market Clearing and Calculation of excess demand for 3 goods.
@@ -1571,19 +1568,19 @@ params = {
         'c_min': 1e-2,     # minimum consumption
         
         # Grid specifications
-        'n_a': 10,         # Number of asset grid points (for testing)
-        'n_m': 10,         # Number of money grid points
-        'n_f': 10,         # Number of illiquid asset grid points
-        'n_b': 20,         # Number of bank grid points
+        'n_a': 20,         # Number of asset grid points (for testing)
+        'n_m': 20,         # Number of money grid points
+        'n_f': 20,         # Number of illiquid asset grid points
+        'n_b': 40,         # Number of bank grid points
         'a_min': 0.0,      # Minimum asset holdings
-        'a_max': 20.0,     # Maximum asset holdings
+        'a_max': 30.0,     # Maximum asset holdings
         'm_min': 0.0,      # Minimum money holdings
-        'm_max': 10.0,     # Maximum money holdings
+        'm_max': 20.0,     # Maximum money holdings
         'f_min': 0.0,      # Minimum illiquid holdings
-        'f_max': 10.0,     # Maximum illiquid holdings
-        'b_min': -10.0,        # Minimum loan value
-        'b_max': 10.0,     # Maximum loan value
-        'ny': 20,          # Number of grid points for DM goods
+        'f_max': 20.0,     # Maximum illiquid holdings
+        'b_min': -20.0,        # Minimum loan value
+        'b_max': 20.0,     # Maximum loan value
+        'ny': 40,          # Number of grid points for DM goods
         
         # Price parameters
         'py': 1.0,         # Price of DM goods
