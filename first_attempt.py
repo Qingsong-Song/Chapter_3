@@ -638,13 +638,7 @@ class LagosWrightAiyagariSolver:
         # Print shape and sample values (first two m and f indices, for each grid)
         for key, array in result.items():
             print(f"\n[{key}] shape: {array.shape}")
-            sample = array[
-                :min(2, array.shape[0]),
-                :min(2, array.shape[1]),
-                :min(2, array.shape[2]),
-                :min(2, array.shape[3])
-            ]
-            print(f"[{key}] sample (first 2 in each dimension):\n{sample}\n")
+            print(f"[{key}] :\n{array}\n")
 
         return result
     
@@ -729,13 +723,7 @@ class LagosWrightAiyagariSolver:
         # Print shapes and sample values
         for key, array in result.items():
             print(f"\n[{key}] shape: {array.shape}")
-            sample = array[
-                :min(2, array.shape[0]),
-                :min(2, array.shape[1]),
-                :min(2, array.shape[2]),
-                :min(2, array.shape[3])
-            ]
-            print(f"[{key}] sample (first 2 in each dimension):\n{sample}\n")
+            print(f"[{key}] :\n{array}\n")
 
         return result
     
@@ -905,13 +893,7 @@ class LagosWrightAiyagariSolver:
 
         # Print shape and a sample slice
         print(f"\n[G_new] shape: {G_new.shape}")
-        sample = G_new[
-            :min(2, G_new.shape[0]),
-            :min(2, G_new.shape[1]),
-            :min(2, G_new.shape[2]),
-            :min(2, G_new.shape[3])
-        ]
-        print(f"[G_new] sample (first 2 in each dimension):\n{sample}\n")      
+        print(f"[G_new]:\n{G_new}\n")      
 
         # Return the updated distribution
         return G_new
@@ -1144,15 +1126,6 @@ class LagosWrightAiyagariSolver:
         excess_demand[:] = [Yd - Ys, Fs - Fd, Bd - Bs]
 
         # Print results
-        print(f"\n[F] shape: {F.shape}")
-        F_sample = F[
-            :min(2, F.shape[0]),
-            :min(2, F.shape[1]),
-            :min(2, F.shape[2]),
-            :min(2, F.shape[3])
-        ]
-        print(f"[F] sample (first 2 in each dimension):\n{F_sample}\n")
-
         print("[demand_vector]:", demand_vector)
         print("[supply_vector]:", supply_vector)
         print("[excess_demand]:", excess_demand)
@@ -1649,6 +1622,9 @@ params = {
         'max_iter': 1000,   # Maximum number of iterations
         'tol': 1e-5        # Convergence tolerance
     }
+import sys, os
+os.makedirs("logs", exist_ok=True)
+sys.stdout = open("logs/full_run_output.txt", "w")
 
 # Initialise solver with parameters
 print("Initialising LagosWrightAiyagariSolver...")
@@ -1686,6 +1662,7 @@ print(f"  Final max diff: {solution['history_value']['max_diff'][-1]:.6e}")
 ## Ensure 'plots' directory exists
 os.makedirs('plots', exist_ok=True)
 
+sys.stdout.close()
 # --- Plot Value Function Convergence ---
 plt.figure(figsize=(10, 6))
 plt.semilogy(range(1, len(solution['history_value']['max_diff']) + 1), 
