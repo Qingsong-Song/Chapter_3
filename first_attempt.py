@@ -213,6 +213,16 @@ class LagosWrightAiyagariSolver:
                         
                         # Map to V
                         self.V[m_idx, f_idx, z_idx, e_idx] = self.W[a_idx, b_idx, z_idx, e_idx]
+         # Print size of W and V
+        print("W shape:", self.W.shape)
+        print("V shape:", self.V.shape)
+
+        # Print some sample values for inspection
+        print("\nFirst two rows from initial guess W:")
+        print(self.W[:min(2, self.n_a), :min(2, self.n_b), :min(2, self.n_z), :min(2, self.n_e)])
+
+        print("\nFirst two rows from initial guess V:")
+        print(self.V[:min(2, self.n_m), :min(2, self.n_f), :min(2, self.n_z), :min(2, self.n_e)])
 
         
     def utility(self, c):
@@ -612,8 +622,8 @@ class LagosWrightAiyagariSolver:
         # Calculate expected value with correct probability weighting
         V_dm = self.alpha * (self.alpha_0 * V0 + self.alpha_1 * V1) + (1 - self.alpha) * V_noshock
 
-        # Return updated value function and policy functions
-        return {
+         # Collect outputs
+        result = {
             'V_dm': V_dm,
             'V0': V0,
             'V1': V1,
@@ -624,6 +634,19 @@ class LagosWrightAiyagariSolver:
             'policy_b1': policy_b1,
             'policy_b_noshock': policy_b_noshock
         }
+
+        # Print shape and sample values (first two m and f indices, for each grid)
+        for key, array in result.items():
+            print(f"\n[{key}] shape: {array.shape}")
+            sample = array[
+                :min(2, array.shape[0]),
+                :min(2, array.shape[1]),
+                :min(2, array.shape[2]),
+                :min(2, array.shape[3])
+            ]
+            print(f"[{key}] sample (first 2 in each dimension):\n{sample}\n")
+
+        return result
     
     @track_time
     def solve_cm_problem_vectorised(self, V_guess, prices):
@@ -696,12 +719,25 @@ class LagosWrightAiyagariSolver:
                         policy_m[a_idx, b_idx, z_idx, e_idx] = self.m_grid[max_indices[0]]
                         policy_f[a_idx, b_idx, z_idx, e_idx] = self.f_grid[max_indices[1]]
         
-        # Return updated value function and policy functions
-        return {
+         # Collect results
+        result = {
             'W': w_value,
             'policy_m': policy_m,
             'policy_f': policy_f,
         }
+
+        # Print shapes and sample values
+        for key, array in result.items():
+            print(f"\n[{key}] shape: {array.shape}")
+            sample = array[
+                :min(2, array.shape[0]),
+                :min(2, array.shape[1]),
+                :min(2, array.shape[2]),
+                :min(2, array.shape[3])
+            ]
+            print(f"[{key}] sample (first 2 in each dimension):\n{sample}\n")
+
+        return result
     
     def solver_iteration(self, prices, W_guess=None):
         """
@@ -865,7 +901,17 @@ class LagosWrightAiyagariSolver:
                             G_new[a1_next_upper, b1_upper, z_idx, e_next_idx] += (g * self.alpha * self.alpha_1 *
                                                                                     (1 - a1_wt) * (1 - b1_wt) * prob)
         # Normalise the new distribution
-        G_new /= np.sum(G_new)      
+        G_new /= np.sum(G_new)
+
+        # Print shape and a sample slice
+        print(f"\n[G_new] shape: {G_new.shape}")
+        sample = G_new[
+            :min(2, G_new.shape[0]),
+            :min(2, G_new.shape[1]),
+            :min(2, G_new.shape[2]),
+            :min(2, G_new.shape[3])
+        ]
+        print(f"[G_new] sample (first 2 in each dimension):\n{sample}\n")      
 
         # Return the updated distribution
         return G_new
@@ -1092,19 +1138,24 @@ class LagosWrightAiyagariSolver:
                             Bs += f_mass * (self.alpha * (self.alpha_0 * Bs_0 + self.alpha_1 * 
                                         Bs_1) + (1 - self.alpha) * Bs_noshock) * P[e_idx, e_next_idx]
 
-        # Save demand
-        demand_vector[0] = Yd
-        demand_vector[1] = Fd
-        demand_vector[2] = Bd
-        # Save supply
-        supply_vector[0] = Ys
-        supply_vector[1] = Fs
-        supply_vector[2] = Bs                
+        # Store demand and supply vectors
+        demand_vector[:] = [Yd, Fd, Bd]
+        supply_vector[:] = [Ys, Fs, Bs]
+        excess_demand[:] = [Yd - Ys, Fs - Fd, Bd - Bs]
 
-        # Calculate excess demand
-        excess_demand[0] = Yd - Ys
-        excess_demand[1] = Fs - Fd   # Rl increases, demand more
-        excess_demand[2] = Bd - Bs
+        # Print results
+        print(f"\n[F] shape: {F.shape}")
+        F_sample = F[
+            :min(2, F.shape[0]),
+            :min(2, F.shape[1]),
+            :min(2, F.shape[2]),
+            :min(2, F.shape[3])
+        ]
+        print(f"[F] sample (first 2 in each dimension):\n{F_sample}\n")
+
+        print("[demand_vector]:", demand_vector)
+        print("[supply_vector]:", supply_vector)
+        print("[excess_demand]:", excess_demand)
 
         return excess_demand, demand_vector, supply_vector
 
