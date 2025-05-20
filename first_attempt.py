@@ -1090,7 +1090,6 @@ class LagosWrightAiyagariSolver:
                         for e_next_idx in range(self.n_e):
                             # Get the current mass of households in this state
                             f_mass = F[m_idx, f_idx, z_idx, e_next_idx]
-
                             # Calculate the demand for goods (when preference shock occurs)
                             yd0 = policy_y0[m_idx, f_idx, z_idx, e_next_idx]
                             yd1 = policy_y1[m_idx, f_idx, z_idx, e_next_idx]

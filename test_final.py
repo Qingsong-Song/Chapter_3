@@ -1568,19 +1568,34 @@ params = {
         'c_min': 1e-2,     # minimum consumption
         
         # Grid specifications
-        'n_a': 20,         # Number of asset grid points (for testing)
-        'n_m': 20,         # Number of money grid points
-        'n_f': 20,         # Number of illiquid asset grid points
-        'n_b': 40,         # Number of bank grid points
+        # 'n_a': 20,         # Number of asset grid points (for testing)
+        # 'n_m': 20,         # Number of money grid points
+        # 'n_f': 20,         # Number of illiquid asset grid points
+        # 'n_b': 40,         # Number of bank grid points
+        # 'a_min': 0.0,      # Minimum asset holdings
+        # 'a_max': 30.0,     # Maximum asset holdings
+        # 'm_min': 0.0,      # Minimum money holdings
+        # 'm_max': 20.0,     # Maximum money holdings
+        # 'f_min': 0.0,      # Minimum illiquid holdings
+        # 'f_max': 20.0,     # Maximum illiquid holdings
+        # 'b_min': -20.0,        # Minimum loan value
+        # 'b_max': 20.0,     # Maximum loan value
+        # 'ny': 40,          # Number of grid points for DM goods
+
+         # Grid specifications
+        'n_a': 10,         # Number of asset grid points (for testing)
+        'n_m': 10,         # Number of money grid points
+        'n_f': 10,         # Number of illiquid asset grid points
+        'n_b': 20,         # Number of bank grid points
         'a_min': 0.0,      # Minimum asset holdings
-        'a_max': 30.0,     # Maximum asset holdings
+        'a_max': 20.0,     # Maximum asset holdings
         'm_min': 0.0,      # Minimum money holdings
-        'm_max': 20.0,     # Maximum money holdings
+        'm_max': 10.0,     # Maximum money holdings
         'f_min': 0.0,      # Minimum illiquid holdings
-        'f_max': 20.0,     # Maximum illiquid holdings
-        'b_min': -20.0,        # Minimum loan value
-        'b_max': 20.0,     # Maximum loan value
-        'ny': 40,          # Number of grid points for DM goods
+        'f_max': 10.0,     # Maximum illiquid holdings
+        'b_min': -10.0,        # Minimum loan value
+        'b_max': 10.0,     # Maximum loan value
+        'ny': 20,          # Number of grid points for DM goods
         
         # Price parameters
         'py': 1.0,         # Price of DM goods
@@ -1593,7 +1608,10 @@ params = {
 
         # Convergence parameters
         'max_iter': 1000,   # Maximum number of iterations
-        'tol': 1e-5        # Convergence tolerance
+        'tol': 1e-5,        # Convergence tolerance
+
+        # New parameters
+        'zeta': 0.5      # prob of meeting a bank if there is no 
     }
 
 # Initialise solver with parameters
