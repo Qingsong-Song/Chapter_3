@@ -433,7 +433,7 @@ class LagosWrightAiyagariSolver:
         }
 
     
-    def solve_dm_problem_vectorised(self, W_guess, prices):
+    def solve_dm_problem_vectorised(self, W_guess, prices, firm_result):
         """
         BLOCK 1: Solve the DM problem.
         Solve the policy functions for the DM.
@@ -465,7 +465,7 @@ class LagosWrightAiyagariSolver:
         y1_nb_grids = {}  # No borrowing grids for ω=1
 
         # precompute firm problem
-        firm_result = self.firm_problem(prices)
+        # firm_result = self.firm_problem(prices)
         wages = firm_result['wages']
         
         
@@ -638,7 +638,7 @@ class LagosWrightAiyagariSolver:
         }
     
     
-    def solve_cm_problem_vectorised(self, V_guess, prices):
+    def solve_cm_problem_vectorised(self, V_guess, prices, firm_result):
         """
          BLOCK 1: Solve the CM problem.
         Solve the policy functions for the CM.
@@ -659,7 +659,7 @@ class LagosWrightAiyagariSolver:
         policy_f = np.zeros_like(w_value)
 
         # Precompute firm problem
-        firm_result = self.firm_problem(prices)
+        # firm_result = self.firm_problem(prices)
         wages = firm_result['wages']
         P = firm_result['transition_matrix']
 
@@ -715,7 +715,7 @@ class LagosWrightAiyagariSolver:
             'policy_f': policy_f,
         }
     
-    def solver_iteration(self, prices, W_guess=None):
+    def solver_iteration(self, prices, firm_result, W_guess=None):
         """
         BLOCK 1: Solve the DM and CM problems via iteration.
         Performs one iteration of the solution algorithm:
@@ -742,11 +742,11 @@ class LagosWrightAiyagariSolver:
             W_guess = self.W
             
         # Step 1: Solve DM problem to get V
-        dm_results = self.solve_dm_problem_vectorised(W_guess, prices)
+        dm_results = self.solve_dm_problem_vectorised(W_guess, prices, firm_result)
         V = dm_results['V_dm']
         
         # Step 2: Solve CM problem to get updated W
-        cm_results = self.solve_cm_problem_vectorised(V, prices)
+        cm_results = self.solve_cm_problem_vectorised(V, prices, firm_result)
         W_updated = cm_results['W']
         
         # Calculate convergence metrics
@@ -770,7 +770,7 @@ class LagosWrightAiyagariSolver:
 
 
     
-    def household_transition(self, G_guess, prices, cm_output, dm_output):
+    def household_transition(self, G_guess, prices, cm_output, dm_output, firm_result):
         """
         BLOCK 2: Household Transition
         Update the household mass distribution based on the current policies and prices.
@@ -795,7 +795,7 @@ class LagosWrightAiyagariSolver:
         G_new = np.zeros_like(G_guess)
 
         # Unpack transition matrix
-        firm_result = self.firm_problem(prices)
+        # firm_result = self.firm_problem(prices)
         P = firm_result['transition_matrix']
 
         # unpack policy functions
@@ -922,7 +922,7 @@ class LagosWrightAiyagariSolver:
         error_list = []
 
         for it in range(max_iter):
-            G_new = self.household_transition(G, prices, cm_output, dm_output)
+            G_new = self.household_transition(G, prices, cm_output, dm_output, firm_result)
             error = np.max(np.abs(G_new - G))
             error_list.append(error)
 
@@ -1005,7 +1005,7 @@ class LagosWrightAiyagariSolver:
 
     
     
-    def market_clearing(self, prices, G, dm_result, cm_result):
+    def market_clearing(self, G, dm_result, cm_result, firm_result):
         """
         BLOCK 3: Market Clearing and Calculation of excess demand for 3 goods.
         Calculate the demand and supply for each goods: 
@@ -1021,7 +1021,7 @@ class LagosWrightAiyagariSolver:
         """
 
         # precompute firm problem
-        firm_result = self.firm_problem(prices)
+        # firm_result = self.firm_problem(prices)
         y_star = firm_result['Ys']
         emp = firm_result['emp']
         J_total = firm_result['J_total']
@@ -1258,7 +1258,9 @@ class LagosWrightAiyagariSolver:
 
             while iteration < self.max_iter and not converged:
                 iter_start = time.time()
-                results = self.solver_iteration(prices, W_current)
+                # compute the firm problem
+                firm_result = self.firm_problem(prices)
+                results = self.solver_iteration(prices, firm_result, W_current)
                 W_current = results['W']
                 max_diff = results['max_diff']
                 mean_diff = results['mean_diff']
@@ -1326,7 +1328,7 @@ class LagosWrightAiyagariSolver:
             print("Export complete.")
 
             for dist_iter in range(max_iter_dist):
-                G_new = self.household_transition(G, prices, cm_output, dm_output)
+                G_new = self.household_transition(G, prices, cm_output, dm_output, firm_result)
                 error = np.max(np.abs(G_new - G))
                 dis_history['max_diff'].append(error)
                 iter_time = time.time() - dist_start
@@ -1350,7 +1352,7 @@ class LagosWrightAiyagariSolver:
             print("Export complete.")
 
             # Market clearing evaluation
-            excess_demand, demand_vector, supply_vector = self.market_clearing(prices, G, dm_output, cm_output)
+            excess_demand, demand_vector, supply_vector = self.market_clearing(G, dm_output, cm_output, firm_result)
             print(f"Excess demand: Goods = {excess_demand[0]:.2e}, Illiquid assets = {excess_demand[1]:.2e}, Bank = {excess_demand[2]:.2e}")
             print(f"Demand: Goods = {demand_vector[0]:.2e}, Illiquid assets = {demand_vector[1]:.2e}, Bank = {demand_vector[2]:.2e}")
             print(f"Supply: Goods = {supply_vector[0]:.2e}, Illiquid assets = {supply_vector[1]:.2e}, Bank = {supply_vector[2]:.2e}")
@@ -1625,34 +1627,34 @@ params = {
         'c_min': 1e-2,     # minimum consumption
         
         # Grid specifications
-        'n_a': 100,         # Number of asset grid points (for testing)
-        'n_m': 100,         # Number of money grid points
-        'n_f': 100,         # Number of illiquid asset grid points
-        'n_b': 200,         # Number of bank grid points
-        'a_min': 0.0,      # Minimum asset holdings
-        'a_max': 110.0,     # Maximum asset holdings
-        'm_min': 0.0,      # Minimum money holdings
-        'm_max': 60.0,     # Maximum money holdings
-        'f_min': 0.0,      # Minimum illiquid holdings
-        'f_max': 60.0,     # Maximum illiquid holdings
-        'b_min': -60.0,        # Minimum loan value
-        'b_max': 60.0,     # Maximum loan value
-        'ny': 150,          # Number of grid points for DM goods
-
-         # Grid specifications
-        # 'n_a': 10,         # Number of asset grid points (for testing)
-        # 'n_m': 10,         # Number of money grid points
-        # 'n_f': 10,         # Number of illiquid asset grid points
-        # 'n_b': 20,         # Number of bank grid points
+        # 'n_a': 100,         # Number of asset grid points (for testing)
+        # 'n_m': 100,         # Number of money grid points
+        # 'n_f': 100,         # Number of illiquid asset grid points
+        # 'n_b': 200,         # Number of bank grid points
         # 'a_min': 0.0,      # Minimum asset holdings
-        # 'a_max': 20.0,     # Maximum asset holdings
+        # 'a_max': 110.0,     # Maximum asset holdings
         # 'm_min': 0.0,      # Minimum money holdings
-        # 'm_max': 10.0,     # Maximum money holdings
+        # 'm_max': 60.0,     # Maximum money holdings
         # 'f_min': 0.0,      # Minimum illiquid holdings
-        # 'f_max': 10.0,     # Maximum illiquid holdings
-        # 'b_min': -10.0,        # Minimum loan value
-        # 'b_max': 10.0,     # Maximum loan value
-        # 'ny': 20,          # Number of grid points for DM goods
+        # 'f_max': 60.0,     # Maximum illiquid holdings
+        # 'b_min': -60.0,        # Minimum loan value
+        # 'b_max': 60.0,     # Maximum loan value
+        # 'ny': 150,          # Number of grid points for DM goods
+
+        # Grid specifications
+        'n_a': 10,         # Number of asset grid points (for testing)
+        'n_m': 10,         # Number of money grid points
+        'n_f': 10,         # Number of illiquid asset grid points
+        'n_b': 20,         # Number of bank grid points
+        'a_min': 0.0,      # Minimum asset holdings
+        'a_max': 20.0,     # Maximum asset holdings
+        'm_min': 0.0,      # Minimum money holdings
+        'm_max': 10.0,     # Maximum money holdings
+        'f_min': 0.0,      # Minimum illiquid holdings
+        'f_max': 10.0,     # Maximum illiquid holdings
+        'b_min': -10.0,        # Minimum loan value
+        'b_max': 10.0,     # Maximum loan value
+        'ny': 20,          # Number of grid points for DM goods
         
         # Price parameters
         'py': 1.0,         # Price of DM goods
