@@ -1143,53 +1143,72 @@ class LagosWrightAiyagariSolver:
 
     
     @staticmethod
-    def update_price_bisection(prices, excess_demand, price_bounds, lambda_=0.5):
+    def update_price_bisection(prices, excess_demand, demand_vector, supply_vector, price_bounds, eps=1e-8):
         """
-        Update prices using the bisection method based on the sign of excess demand.
-        
+        Adaptive bisection price update based on relative excess demand.
+
         Parameters
         ----------
         prices : array-like
             Current price vector [py, Rl, i].
         excess_demand : array-like
             Excess demand vector [goods, illiquid asset, bank].
+        demand_vector : array-like
+            Demand levels [goods, illiquid, bank].
+        supply_vector : array-like
+            Supply levels [goods, illiquid, bank].
         price_bounds : list of tuples
-            Bounds for each price [(py_min, py_max), (Rl_min, Rl_max), (i_min, i_max)].
-        lambda_ : float
-            Weighting factor between 0 and 1.
-            
+            Bounds for each price [(py_min, py_max), ...].
+
         Returns
         -------
         new_prices : np.ndarray
             Updated price vector.
         new_bounds : list of tuples
-            Updated bounds for the next iteration.
+            Updated bounds for next iteration.
         """
+
         new_prices = prices.copy()
         new_bounds = price_bounds.copy()
-        
+
         for i in range(len(prices)):
             p_old = prices[i]
             lower, upper = price_bounds[i]
-            
-            if excess_demand[i] > 0:
-                # Excess demand: increase price → new lower bound = current price
-                lower = p_old
-                p_new = lambda_ * upper + (1 - lambda_) * p_old
+
+            # Relative excess demand
+            D = demand_vector[i]
+            S = supply_vector[i]
+            rel_excess = abs(excess_demand[i]) / max(abs(D), abs(S), eps)
+
+            # Adaptive lambda
+            if rel_excess < 1e-2:
+                lambda_i = 0.1
+            elif rel_excess < 0.1:
+                lambda_i = 0.3
+            elif rel_excess < 0.5:
+                lambda_i = 0.5
             else:
-                # Excess supply: decrease price → new upper bound = current price
+                lambda_i = 0.8
+
+            # Price update direction
+            if excess_demand[i] > 0:
+                # Excess demand → raise price
+                lower = p_old
+                p_new = lambda_i * upper + (1 - lambda_i) * p_old
+            else:
+                # Excess supply → lower price
                 upper = p_old
-                p_new = lambda_ * lower + (1 - lambda_) * p_old
+                p_new = lambda_i * lower + (1 - lambda_i) * p_old
 
             new_prices[i] = p_new
             new_bounds[i] = (lower, upper)
-            
+
         return new_prices, new_bounds
 
 
 
     def solve_model(self, prices=None, plot_frequency=50, report_frequency=100, tol_dist=1e-5, 
-                        max_iter_dist=100000, tol_market=1e-3, max_iter_market=1000, lambda_=0.5):
+                        max_iter_dist=100000, tol_market=1e-3, max_iter_market=1000):
         """
         Solve the model by iterating on the market clearing prices and the household distribution.
          BLOCK 3: Iterate prices using the bisection method.
@@ -1342,7 +1361,7 @@ class LagosWrightAiyagariSolver:
                 break
 
             # Price update using bisection
-            prices, price_bounds = self.update_price_bisection(prices, excess_demand, price_bounds, lambda_=lambda_)
+            prices, price_bounds = self.update_price_bisection(prices, excess_demand, demand_vector, supply_vector, price_bounds)
             print(f"Updated prices: py = {prices[0]:.4f}, Rl = {prices[1]:.4f}, i = {prices[2]:.4f}\n")
 
         else:
@@ -1618,7 +1637,7 @@ params = {
         'f_max': 60.0,     # Maximum illiquid holdings
         'b_min': -60.0,        # Minimum loan value
         'b_max': 60.0,     # Maximum loan value
-        'ny': 200,          # Number of grid points for DM goods
+        'ny': 150,          # Number of grid points for DM goods
 
          # Grid specifications
         # 'n_a': 10,         # Number of asset grid points (for testing)
