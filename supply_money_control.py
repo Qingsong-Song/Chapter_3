@@ -470,10 +470,12 @@ class LagosWrightAiyagariSolver:
         
         
         for m_idx, a_m in enumerate(self.m_grid):
+            # Compute once per a_m
+            y0_line = np.linspace(0, a_m / py, self.ny)
             for f_idx, a_f in enumerate(self.f_grid):
                 a = min(a_m + a_f, self.a_max)  # Total assets
                 y1_nb_grids[(m_idx, f_idx)] = np.linspace(0, a/py, self.ny)  # Can use all assets when ω=1
-                y0_nb_grids[(m_idx, f_idx)] = np.linspace(0, a_m/py, self.ny)
+                y0_nb_grids[(m_idx, f_idx)] = y0_line
         
         
         # Loop over employment states and skill types
@@ -497,7 +499,7 @@ class LagosWrightAiyagariSolver:
                             W_guess[:, :, z_idx, e_idx]
                         )[0]   # since all values are the same in this vector (inputs are scalar)
                         w_nobank_values[m_idx] = self.interpolate_2d_vectorised(
-                            np.array([a ]), np.array([0]),
+                            np.array([a]), np.array([0]),    # number not index
                             self.a_grid, self.b_grid,
                             W_guess[:, :, z_idx, e_idx]
                         )[0]   # since all values are the same in this vector (inputs are scalar)
@@ -506,12 +508,9 @@ class LagosWrightAiyagariSolver:
                         policy_b_nobank[m_idx, f_idx, z_idx, e_idx] = 0
                         
                             
-                    # Store no-shock values for all money levels at once
-                    V_noshock[:, f_idx, z_idx, e_idx] = self.ϖ * w_noshock_values + (1 - self.ϖ) * w_nobank_values
+                        # Store no-shock values for all money levels at once
+                        V_noshock[m_idx, f_idx, z_idx, e_idx] = self.ϖ * w_noshock_values[m_idx] + (1 - self.ϖ) * w_nobank_values[m_idx]
                     
-                    # Process each money level separately for shock cases
-                    for m_idx, a_m in enumerate(self.m_grid):
-                        a = min(a_m + a_f, self.a_max)
                         
                         # -------------------------------------------------------------------------
                         # Case 1: Preference shock + ω=0 (only money accepted)
@@ -1143,67 +1142,40 @@ class LagosWrightAiyagariSolver:
 
     
     @staticmethod
-    def update_price_bisection(prices, excess_demand, demand_vector, supply_vector, price_bounds, eps=1e-8):
+    def update_price_bisection(prices, excess_demand, demand_vector, supply_vector, price_bounds):
         """
-        Adaptive bisection price update based on relative excess demand.
-
-        Parameters
-        ----------
-        prices : array-like
-            Current price vector [py, Rl, i].
-        excess_demand : array-like
-            Excess demand vector [goods, illiquid asset, bank].
-        demand_vector : array-like
-            Demand levels [goods, illiquid, bank].
-        supply_vector : array-like
-            Supply levels [goods, illiquid, bank].
-        price_bounds : list of tuples
-            Bounds for each price [(py_min, py_max), ...].
-
-        Returns
-        -------
-        new_prices : np.ndarray
-            Updated price vector.
-        new_bounds : list of tuples
-            Updated bounds for next iteration.
+        Update prices using adaptive bisection based on scale difference between demand and supply.
         """
-
         new_prices = prices.copy()
         new_bounds = price_bounds.copy()
 
         for i in range(len(prices)):
+            D, S = demand_vector[i], supply_vector[i]
             p_old = prices[i]
             lower, upper = price_bounds[i]
 
-            # Relative excess demand
-            D = demand_vector[i]
-            S = supply_vector[i]
-            rel_excess = abs(excess_demand[i]) / max(abs(D), abs(S), eps)
-
-            # Adaptive lambda
-            if rel_excess < 1e-2:
-                lambda_i = 0.1
-            elif rel_excess < 0.1:
-                lambda_i = 0.3
-            elif rel_excess < 0.5:
-                lambda_i = 0.5
+            # Determine lambda based on scale difference
+            scale_ratio = max(abs(D), abs(S)) / (min(abs(D), abs(S)) + 1e-8)
+            if scale_ratio <= 2:
+                lambda_ = 0.1
+            elif scale_ratio <= 10:
+                lambda_ = 0.5
             else:
-                lambda_i = 0.8
+                lambda_ = 0.9
 
-            # Price update direction
+            # Standard bisection logic
             if excess_demand[i] > 0:
-                # Excess demand → raise price
                 lower = p_old
-                p_new = lambda_i * upper + (1 - lambda_i) * p_old
+                p_new = lambda_ * upper + (1 - lambda_) * p_old
             else:
-                # Excess supply → lower price
                 upper = p_old
-                p_new = lambda_i * lower + (1 - lambda_i) * p_old
+                p_new = lambda_ * lower + (1 - lambda_) * p_old
 
             new_prices[i] = p_new
             new_bounds[i] = (lower, upper)
 
         return new_prices, new_bounds
+
 
 
 

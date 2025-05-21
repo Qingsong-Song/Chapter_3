@@ -505,12 +505,8 @@ class LagosWrightAiyagariSolver:
                         policy_b_noshock[m_idx, f_idx, z_idx, e_idx] = a_m
                         
                             
-                    # Store no-shock values for all money levels at once
-                    V_noshock[:, f_idx, z_idx, e_idx] = w_noshock_values
-                    
-                    # Process each money level separately for shock cases
-                    for m_idx, a_m in enumerate(self.m_grid):
-                        a = min(a_m + a_f, self.a_max)
+                        # Store no-shock values for all money levels at once
+                        V_noshock[m_idx, f_idx, z_idx, e_idx] = w_noshock_values[m_idx]
                         
                         # -------------------------------------------------------------------------
                         # Case 1: Preference shock + ω=0 (only money accepted)
