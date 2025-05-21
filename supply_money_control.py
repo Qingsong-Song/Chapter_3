@@ -510,7 +510,6 @@ class LagosWrightAiyagariSolver:
                             
                         # Store no-shock values for all money levels at once
                         V_noshock[m_idx, f_idx, z_idx, e_idx] = self.ϖ * w_noshock_values[m_idx] + (1 - self.ϖ) * w_nobank_values[m_idx]
-                    
                         
                         # -------------------------------------------------------------------------
                         # Case 1: Preference shock + ω=0 (only money accepted)
