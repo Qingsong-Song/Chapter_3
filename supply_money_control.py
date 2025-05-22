@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import os
 import time
 import pandas as pd
+from multiprocessing import Pool
 
 def track_time(func):
     """Decorator to track the execution time of a function."""
@@ -82,6 +83,147 @@ def find_closest_indices(grid, value):
         # upper_weight = (value - grid[lower_idx]) / grid_range
     
     return lower_idx, upper_idx, lower_weight
+
+
+def interpolate_2d_vectorised(x_values, y_values, x_grid, y_grid, grid_values):
+        """
+        Vectorised bilinear interpolation for arrays of query points
+        
+        Parameters:
+        -----------
+        x_values, y_values : numpy.ndarray
+            Arrays of query points (same shape)
+        x_grid, y_grid : numpy.ndarray
+            1D arrays of grid points
+        grid_values : numpy.ndarray
+            2D array of values at grid points
+        """
+        x_values = np.asarray(x_values)
+        y_values = np.asarray(y_values)
+        
+        # Find indices using broadcasting
+        x_idx = np.searchsorted(x_grid, x_values) - 1
+        y_idx = np.searchsorted(y_grid, y_values) - 1
+        
+        # Clip indices to valid range
+        x_idx = np.clip(x_idx, 0, len(x_grid) - 2)
+        y_idx = np.clip(y_idx, 0, len(y_grid) - 2)
+        
+        # Get surrounding points
+        x0 = x_grid[x_idx]
+        x1 = x_grid[x_idx + 1]
+        y0 = y_grid[y_idx]
+        y1 = y_grid[y_idx + 1]
+        
+        # Calculate weights using broadcasting
+        wx = (x1 - x_values) / (x1 - x0)
+        wy = (y1 - y_values) / (y1 - y0)
+        
+        # Handle edge cases
+        wx = np.where((x1 - x0) == 0, 1.0, wx)
+        wy = np.where((y1 - y0) == 0, 1.0, wy)
+        
+        # Get values at corners using advanced indexing
+        v00 = grid_values[x_idx, y_idx]
+        v10 = grid_values[x_idx + 1, y_idx]
+        v01 = grid_values[x_idx, y_idx + 1]
+        v11 = grid_values[x_idx + 1, y_idx + 1]
+        
+        # Bilinear interpolation using broadcasting
+        return (v00 * wx * wy + 
+                v10 * (1 - wx) * wy + 
+                v01 * wx * (1 - wy) + 
+                v11 * (1 - wx) * (1 - wy))
+
+
+def solve_dm_worker(args):
+    (m_idx, f_idx, a_m, a_f, py, i, ny, a_max,
+     y0_nb, y1_nb, wages, a_grid, b_grid, W_slice,
+     z_dim, e_dim, utility_dm, interpolate_2d_vectorised, c_min, ϖ) = args
+
+    result = {
+        'V0': np.zeros((z_dim, e_dim), dtype=np.float32),
+        'V1': np.zeros((z_dim, e_dim), dtype=np.float32),
+        'V_noshock': np.zeros((z_dim, e_dim), dtype=np.float32),
+        'policy_y0': np.zeros((z_dim, e_dim), dtype=np.float32),
+        'policy_b0': np.zeros((z_dim, e_dim), dtype=np.float32),
+        'policy_y1': np.zeros((z_dim, e_dim), dtype=np.float32),
+        'policy_b1': np.zeros((z_dim, e_dim), dtype=np.float32),
+        'policy_b_noshock': np.zeros((z_dim, e_dim), dtype=np.float32),
+        'policy_b_nobank': np.zeros((z_dim, e_dim), dtype=np.float32),
+    }
+
+    a = min(a_m + a_f, a_max)
+
+    for z_idx in range(z_dim):
+        for e_idx in range(e_dim):
+            income = wages[z_idx, e_idx]
+            W = W_slice[:, :, z_idx, e_idx]
+
+            w_noshock = interpolate_2d_vectorised([a - a_m], [a_m], a_grid, b_grid, W)[0]
+            w_nobank = interpolate_2d_vectorised([a], [0], a_grid, b_grid, W)[0]
+            result['V_noshock'][z_idx, e_idx] = ϖ * w_noshock + (1 - ϖ) * w_nobank
+            result['policy_b_noshock'][z_idx, e_idx] = a_m
+            result['policy_b_nobank'][z_idx, e_idx] = 0
+
+            d0 = a_m - py * y0_nb
+            w0_nb = interpolate_2d_vectorised(a_f, d0, a_grid, b_grid, W)
+            v0_nb = utility_dm(y0_nb) + w0_nb
+
+            income_max = (a_f + income - c_min) / (1 + i)
+            collateral_max = a_f / (1 + i)
+            max_borrow_0 = min(income_max, collateral_max)
+
+            if max_borrow_0 > 0:
+                y0_b = np.linspace(0, (a_m + max_borrow_0)/py, ny)
+                l0 = np.clip(py*y0_b - a_m, 0, max_borrow_0)
+                w0_b = interpolate_2d_vectorised(a + l0 - py*y0_b, -l0, a_grid, b_grid, W)
+                v0_b = utility_dm(y0_b) + w0_b
+
+                if v0_nb.max() >= v0_b.max():
+                    idx = np.argmax(v0_nb)
+                    result['policy_y0'][z_idx, e_idx] = y0_nb[idx]
+                    result['policy_b0'][z_idx, e_idx] = d0[idx]
+                    result['V0'][z_idx, e_idx] = v0_nb[idx]
+                else:
+                    idx = np.argmax(v0_b)
+                    result['policy_y0'][z_idx, e_idx] = y0_b[idx]
+                    result['policy_b0'][z_idx, e_idx] = -l0[idx]
+                    result['V0'][z_idx, e_idx] = v0_b[idx]
+            else:
+                idx = np.argmax(v0_nb)
+                result['policy_y0'][z_idx, e_idx] = y0_nb[idx]
+                result['policy_b0'][z_idx, e_idx] = d0[idx]
+                result['V0'][z_idx, e_idx] = v0_nb[idx]
+
+            d1 = a - py * y1_nb
+            w1_nb = interpolate_2d_vectorised(a_f, d1, a_grid, b_grid, W)
+            v1_nb = utility_dm(y1_nb) + w1_nb
+
+            max_borrow_1 = (income - c_min) / (1 + i)
+            if max_borrow_1 > 0:
+                y1_b = np.linspace(0, (a + max_borrow_1)/py, ny)
+                l1 = np.clip(py*y1_b - a, 0, max_borrow_1)
+                w1_b = interpolate_2d_vectorised(a + l1 - py*y1_b, -l1, a_grid, b_grid, W)
+                v1_b = utility_dm(y1_b) + w1_b
+
+                if v1_nb.max() >= v1_b.max():
+                    idx = np.argmax(v1_nb)
+                    result['policy_y1'][z_idx, e_idx] = y1_nb[idx]
+                    result['policy_b1'][z_idx, e_idx] = d1[idx]
+                    result['V1'][z_idx, e_idx] = v1_nb[idx]
+                else:
+                    idx = np.argmax(v1_b)
+                    result['policy_y1'][z_idx, e_idx] = y1_b[idx]
+                    result['policy_b1'][z_idx, e_idx] = -l1[idx]
+                    result['V1'][z_idx, e_idx] = v1_b[idx]
+            else:
+                idx = np.argmax(v1_nb)
+                result['policy_y1'][z_idx, e_idx] = y1_nb[idx]
+                result['policy_b1'][z_idx, e_idx] = d1[idx]
+                result['V1'][z_idx, e_idx] = v1_nb[idx]
+
+    return (m_idx, f_idx, result)
 
 
 class LagosWrightAiyagariSolver:
@@ -445,7 +587,6 @@ class LagosWrightAiyagariSolver:
         """
         # Unpack prices
         py = prices[0]
-        Rl = prices[1]
         i = prices[2]
 
         # Initialise arrays - using float32 for memory efficiency if precision allows
@@ -493,12 +634,12 @@ class LagosWrightAiyagariSolver:
                         # Total assets
                         a = min(a_m + a_f, self.a_max)
                         # Calculate continuation value
-                        w_noshock_values[m_idx] = self.interpolate_2d_vectorised(
+                        w_noshock_values[m_idx] = interpolate_2d_vectorised(
                             np.array([a - a_m]), np.array([a_m]),
                             self.a_grid, self.b_grid,
                             W_guess[:, :, z_idx, e_idx]
                         )[0]   # since all values are the same in this vector (inputs are scalar)
-                        w_nobank_values[m_idx] = self.interpolate_2d_vectorised(
+                        w_nobank_values[m_idx] = interpolate_2d_vectorised(
                             np.array([a]), np.array([0]),    # number not index
                             self.a_grid, self.b_grid,
                             W_guess[:, :, z_idx, e_idx]
@@ -519,7 +660,7 @@ class LagosWrightAiyagariSolver:
                         y0_nb = y0_nb_grids[(m_idx, f_idx)]
                         d0 = a_m - py*y0_nb  # won't exceed the maximum
                         
-                        w0_nb = self.interpolate_2d_vectorised(
+                        w0_nb = interpolate_2d_vectorised(
                             a_f, d0, 
                             self.a_grid, self.b_grid,                # a_f is the total asset
                             W_guess[:, :, z_idx, e_idx]           # when money is either consumed or deposited
@@ -537,7 +678,7 @@ class LagosWrightAiyagariSolver:
                             y0_b = np.linspace(0, (a_m + effective_max_borrow)/py, self.ny)
                             l0 = np.clip(py*y0_b - a_m, 0, effective_max_borrow)   # borrow exactly the amount needed to consume
                             
-                            w0_b = self.interpolate_2d_vectorised(
+                            w0_b = interpolate_2d_vectorised(
                                 a + l0 - py*y0_b, -l0,
                                 self.a_grid, self.b_grid,
                                 W_guess[:, :, z_idx, e_idx]
@@ -574,7 +715,7 @@ class LagosWrightAiyagariSolver:
                         y1_nb = y1_nb_grids[(m_idx, f_idx)]
                         d1 = a - py*y1_nb
                         
-                        w1_nb = self.interpolate_2d_vectorised(
+                        w1_nb = interpolate_2d_vectorised(
                             a_f, d1,       # money is either consumed or deposited; only a_f is the total asset
                             self.a_grid, self.b_grid,
                             W_guess[:, :, z_idx, e_idx]
@@ -589,7 +730,7 @@ class LagosWrightAiyagariSolver:
                             y1_b = np.linspace(0, (a + max_borrow)/py, self.ny)
                             l1 = np.clip(py*y1_b - a, 0, max_borrow)
                             
-                            w1_b = self.interpolate_2d_vectorised(
+                            w1_b = interpolate_2d_vectorised(
                                 a + l1 - py*y1_b, -l1,
                                 self.a_grid, self.b_grid,
                                 W_guess[:, :, z_idx, e_idx]
@@ -634,6 +775,72 @@ class LagosWrightAiyagariSolver:
             'policy_b_noshock': policy_b_noshock,
             'policy_b_nobank': policy_b_nobank
         }
+
+    # Part 2: Revised class method using multiprocessing
+    def solve_dm_problem_vectorised_parallel(self, W_guess, prices, firm_result):
+        py, _, i = prices
+        wages = firm_result['wages']
+
+        shape = (self.n_m, self.n_f, self.n_z, self.n_e)
+        V0 = np.zeros(shape, dtype=np.float32)
+        V1 = np.zeros(shape, dtype=np.float32)
+        V_noshock = np.zeros(shape, dtype=np.float32)
+        policy_y0 = np.zeros(shape, dtype=np.float32)
+        policy_b0 = np.zeros(shape, dtype=np.float32)
+        policy_y1 = np.zeros(shape, dtype=np.float32)
+        policy_b1 = np.zeros(shape, dtype=np.float32)
+        policy_b_noshock = np.zeros(shape, dtype=np.float32)
+        policy_b_nobank = np.zeros(shape, dtype=np.float32)
+
+        y0_nb_grids = {}
+        y1_nb_grids = {}
+        for m_idx, a_m in enumerate(self.m_grid):
+            y0_line = np.linspace(0, a_m / py, self.ny)
+            for f_idx, a_f in enumerate(self.f_grid):
+                a = min(a_m + a_f, self.a_max)
+                y1_nb_grids[(m_idx, f_idx)] = np.linspace(0, a / py, self.ny)
+                y0_nb_grids[(m_idx, f_idx)] = y0_line
+
+        args = []
+        for m_idx, a_m in enumerate(self.m_grid):
+            for f_idx, a_f in enumerate(self.f_grid):
+                y0_nb = y0_nb_grids[(m_idx, f_idx)]
+                y1_nb = y1_nb_grids[(m_idx, f_idx)]
+                args.append((
+                    m_idx, f_idx, a_m, a_f, py, i, self.ny, self.a_max,
+                    y0_nb, y1_nb, wages, self.a_grid, self.b_grid, W_guess,
+                    self.n_z, self.n_e, self.utility_dm, interpolate_2d_vectorised,
+                    self.c_min, self.ϖ
+                ))
+
+        with Pool() as pool:
+            results = pool.map(solve_dm_worker, args)
+
+        for m_idx, f_idx, res in results:
+            V0[m_idx, f_idx] = res['V0']
+            V1[m_idx, f_idx] = res['V1']
+            V_noshock[m_idx, f_idx] = res['V_noshock']
+            policy_y0[m_idx, f_idx] = res['policy_y0']
+            policy_b0[m_idx, f_idx] = res['policy_b0']
+            policy_y1[m_idx, f_idx] = res['policy_y1']
+            policy_b1[m_idx, f_idx] = res['policy_b1']
+            policy_b_noshock[m_idx, f_idx] = res['policy_b_noshock']
+            policy_b_nobank[m_idx, f_idx] = res['policy_b_nobank']
+
+        V_dm = self.alpha * (self.alpha_0 * V0 + self.alpha_1 * V1) + (1 - self.alpha) * V_noshock
+
+        return {
+            'V_dm': V_dm,
+            'V0': V0,
+            'V1': V1,
+            'V_noshock': V_noshock,
+            'policy_y0': policy_y0,
+            'policy_b0': policy_b0,
+            'policy_y1': policy_y1,
+            'policy_b1': policy_b1,
+            'policy_b_noshock': policy_b_noshock,
+            'policy_b_nobank': policy_b_nobank
+        }
     
     
     def solve_cm_problem_vectorised(self, V_guess, prices, firm_result):
@@ -647,7 +854,6 @@ class LagosWrightAiyagariSolver:
             Updated value function W and policy functions.
         """
         # Unpack prices
-        py = prices[0]
         Rl = prices[1]
         i = prices[2]
 
@@ -786,8 +992,6 @@ class LagosWrightAiyagariSolver:
         """
         # Unpack prices
         py = prices[0]
-        Rl = prices[1]
-        i = prices[2]
 
         # Initialise transition matrix
         G_new = np.zeros_like(G_guess)
@@ -948,58 +1152,7 @@ class LagosWrightAiyagariSolver:
         plt.show()
 
         return G_new, error_list
-                
 
-
-    def interpolate_2d_vectorised(self, x_values, y_values, x_grid, y_grid, grid_values):
-        """
-        Vectorised bilinear interpolation for arrays of query points
-        
-        Parameters:
-        -----------
-        x_values, y_values : numpy.ndarray
-            Arrays of query points (same shape)
-        x_grid, y_grid : numpy.ndarray
-            1D arrays of grid points
-        grid_values : numpy.ndarray
-            2D array of values at grid points
-        """
-        x_values = np.asarray(x_values)
-        y_values = np.asarray(y_values)
-        
-        # Find indices using broadcasting
-        x_idx = np.searchsorted(x_grid, x_values) - 1
-        y_idx = np.searchsorted(y_grid, y_values) - 1
-        
-        # Clip indices to valid range
-        x_idx = np.clip(x_idx, 0, len(x_grid) - 2)
-        y_idx = np.clip(y_idx, 0, len(y_grid) - 2)
-        
-        # Get surrounding points
-        x0 = x_grid[x_idx]
-        x1 = x_grid[x_idx + 1]
-        y0 = y_grid[y_idx]
-        y1 = y_grid[y_idx + 1]
-        
-        # Calculate weights using broadcasting
-        wx = (x1 - x_values) / (x1 - x0)
-        wy = (y1 - y_values) / (y1 - y0)
-        
-        # Handle edge cases
-        wx = np.where((x1 - x0) == 0, 1.0, wx)
-        wy = np.where((y1 - y0) == 0, 1.0, wy)
-        
-        # Get values at corners using advanced indexing
-        v00 = grid_values[x_idx, y_idx]
-        v10 = grid_values[x_idx + 1, y_idx]
-        v01 = grid_values[x_idx, y_idx + 1]
-        v11 = grid_values[x_idx + 1, y_idx + 1]
-        
-        # Bilinear interpolation using broadcasting
-        return (v00 * wx * wy + 
-                v10 * (1 - wx) * wy + 
-                v01 * wx * (1 - wy) + 
-                v11 * (1 - wx) * (1 - wy))
 
     
     
@@ -1575,137 +1728,189 @@ class LagosWrightAiyagariSolver:
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.savefig(f'plots/portfolio_composition_iter_{iteration}.png')
         plt.close()
-    
 
-params = {
-        # Preference parameters
-        'beta': 0.96,      # Discount factor
-        'alpha': 0.075,    # Probability of DM consumption opportunity (tested 0.3, originally works but dies overtime)
-        'alpha_1': 0.06,   # Probability of accepting both money and assets
-        'gamma': 1.5,      # Risk aversion parameter
-        'Psi': 2.2,        # DM utility scaling parameter
-        
-        # Production and labor market parameters
-        'psi': 0.28,       # Matching function elasticity
-        'zeta': 0.75,      # Worker bargaining power
-        'nu': 1.6,         # Labor supply elasticity
-        'mu': 0.7,         # Matching efficiency
-        'delta': 0.035,    # Job separation rate
-        'kappa': 7.29,     # Vacancy posting cost
-        'repl_rate': 0.4,  # Unemployment benefit replacement rate
 
-        # DM parameters
-        'c_min': 1e-2,     # minimum consumption
-        
-        # Grid specifications
-        # 'n_a': 100,         # Number of asset grid points (for testing)
-        # 'n_m': 100,         # Number of money grid points
-        # 'n_f': 100,         # Number of illiquid asset grid points
-        # 'n_b': 200,         # Number of bank grid points
-        # 'a_min': 0.0,      # Minimum asset holdings
-        # 'a_max': 110.0,     # Maximum asset holdings
-        # 'm_min': 0.0,      # Minimum money holdings
-        # 'm_max': 60.0,     # Maximum money holdings
-        # 'f_min': 0.0,      # Minimum illiquid holdings
-        # 'f_max': 60.0,     # Maximum illiquid holdings
-        # 'b_min': -60.0,        # Minimum loan value
-        # 'b_max': 60.0,     # Maximum loan value
-        # 'ny': 150,          # Number of grid points for DM goods
-
-        # Grid specifications
-        'n_a': 10,         # Number of asset grid points (for testing)
-        'n_m': 10,         # Number of money grid points
-        'n_f': 10,         # Number of illiquid asset grid points
-        'n_b': 20,         # Number of bank grid points
-        'a_min': 0.0,      # Minimum asset holdings
-        'a_max': 20.0,     # Maximum asset holdings
-        'm_min': 0.0,      # Minimum money holdings
-        'm_max': 10.0,     # Maximum money holdings
-        'f_min': 0.0,      # Minimum illiquid holdings
-        'f_max': 10.0,     # Maximum illiquid holdings
-        'b_min': -10.0,        # Minimum loan value
-        'b_max': 10.0,     # Maximum loan value
-        'ny': 20,          # Number of grid points for DM goods
-        
-        # Price parameters
-        'py': 1.0,         # Price of DM goods
-        'Rl': 1.03,        # Return on illiquid assets
-        'i': 0.02,         # Nominal interest rate
-        'Rm': (1.0-0.014)**(1.0/12.0),   # Gross return of real money balances (exogenous)
-
-        # Government Spending
-        'Ag0': 0.1,        # Exogenous government spending 
-
-        # Convergence parameters
-        'max_iter': 1000,   # Maximum number of iterations
-        'tol': 1e-5,        # Convergence tolerance
-
-        # New parameters
-        'ϖ': 0.075      # prob of meeting a bank if there is no preference shock
+if __name__ == "__main__":
+    # Step 1: Define parameters
+    params = {
+        'beta': 0.96, 'alpha': 0.075, 'alpha_1': 0.06, 'gamma': 1.5, 'Psi': 2.2,
+        'psi': 0.28, 'zeta': 0.75, 'nu': 1.6, 'mu': 0.7, 'delta': 0.035,
+        'kappa': 7.29, 'repl_rate': 0.4, 'c_min': 1e-2,
+        'n_a': 10, 'n_m': 10, 'n_f': 10, 'n_b': 20,
+        'a_min': 0.0, 'a_max': 20.0, 'm_min': 0.0, 'm_max': 10.0,
+        'f_min': 0.0, 'f_max': 10.0, 'b_min': -10.0, 'b_max': 10.0,
+        'ny': 20, 'py': 1.0, 'Rl': 1.03, 'i': 0.02,
+        'Rm': (1.0 - 0.014)**(1.0 / 12.0), 'Ag0': 0.1,
+        'max_iter': 1000, 'tol': 1e-5, 'ϖ': 0.075
     }
 
-# Initialise solver with parameters
-print("Initialising LagosWrightAiyagariSolver...")
-solver = LagosWrightAiyagariSolver(params)
+    # Step 2: Create solver
+    print("Initialising LagosWrightAiyagariSolver...")
+    solver = LagosWrightAiyagariSolver(params)
 
-# Set baseline prices
-baseline_prices = np.array([
-    params['py'],      # Price of DM goods
-    params['Rl'],      # Return on illiquid assets
-    params['i']        # Nominal interest rate
-])
+    # Step 3: Set up prices
+    baseline_prices = np.array([
+        params['py'],  # Price of DM goods
+        params['Rl'],  # Return on illiquid assets
+        params['i']    # Nominal interest rate
+    ])
 
-# Print initial conditions
-print("\nInitial conditions:")
-firm_result = solver.firm_problem(prices=baseline_prices)
-print(f"  Employment rate: {firm_result['emp']:.4f}")
-# print(f"  Labor market tightness: {solver.market_tightness:.4f}")
-# print(f"  Job finding probability: {solver.job_finding_prob:.4f}")
-# print(f"  Employment rate: {solver.emp_rate:.4f}")
-print(f"  Wages (employed, z=1): {firm_result['wages'][1, 1]:.4f}")
-print(f"  Wages (unemployed, z=1): {firm_result['wages'][1, 0]:.4f}")
+    # Step 4: Solve firm block to get wages
+    print("\nInitial conditions:")
+    firm_result = solver.firm_problem(prices=baseline_prices)
+    print(f"  Employment rate: {firm_result['emp']:.4f}")
+    print(f"  Wages (employed, z=1): {firm_result['wages'][1, 1]:.4f}")
+    print(f"  Wages (unemployed, z=1): {firm_result['wages'][1, 0]:.4f}")
 
-# Solve the model
-print("\nSolving model...")
-# solver.compute_firm_block(prices=baseline_prices)
-solution = solver.solve_model(prices=baseline_prices, plot_frequency=50, report_frequency=100)
+    # See time before parallelisation
+    start_time = time.time()
+    solution = solver.solve_dm_problem_vectorised(W_guess=solver.W, prices=baseline_prices, firm_result=firm_result)
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Solved DM problem before parallelisation in {elapsed_time:.2f} seconds.")   
 
-# Print results
-print("\nSolution results:")
-print(f"  Converged: {solution['converged']}")
-print(f"  Iterations: {solution['iterations']}")
-print(f"  Total time: {solution['total_time']:.2f} seconds")
-print(f"  Final max diff: {solution['history_value']['max_diff'][-1]:.6e}")
+    # Step 6: Run the parallelized DM solver
+    start_time = time.time()
+    print("\nSolving DM block with multiprocessing...")
+    solution = solver.solve_dm_problem_vectorised_parallel(W_guess=solver.W, prices=baseline_prices, firm_result=firm_result)
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    print(f"Solved DM problem after parallelisation in {elapsed_time:.2f} seconds.")
 
-## Ensure 'plots' directory exists
-os.makedirs('plots', exist_ok=True)
+    # Step 7: Use the solution
+    print("Finished solving. V_dm shape:", solution['V_dm'].shape)
+    print("Sample V_dm[0,0,0,0]:", solution['V_dm'][0, 0, 0, 0])
+    
 
-# --- Plot Value Function Convergence ---
-plt.figure(figsize=(10, 6))
-plt.semilogy(range(1, len(solution['history_value']['max_diff']) + 1), 
-             solution['history_value']['max_diff'], 'b-', label='Max Diff')
-plt.semilogy(range(1, len(solution['history_value']['mean_diff']) + 1), 
-             solution['history_value']['mean_diff'], 'r--', label='Mean Diff')
-plt.axhline(y=params['tol'], color='k', linestyle=':', label='Tolerance')
-plt.xlabel('Iteration')
-plt.ylabel('Value Function Difference (log scale)')
-plt.title('Value Function Convergence History')
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.savefig('plots/value_function_convergence.png')
-plt.close()
+# params = {
+#         # Preference parameters
+#         'beta': 0.96,      # Discount factor
+#         'alpha': 0.075,    # Probability of DM consumption opportunity (tested 0.3, originally works but dies overtime)
+#         'alpha_1': 0.06,   # Probability of accepting both money and assets
+#         'gamma': 1.5,      # Risk aversion parameter
+#         'Psi': 2.2,        # DM utility scaling parameter
+        
+#         # Production and labor market parameters
+#         'psi': 0.28,       # Matching function elasticity
+#         'zeta': 0.75,      # Worker bargaining power
+#         'nu': 1.6,         # Labor supply elasticity
+#         'mu': 0.7,         # Matching efficiency
+#         'delta': 0.035,    # Job separation rate
+#         'kappa': 7.29,     # Vacancy posting cost
+#         'repl_rate': 0.4,  # Unemployment benefit replacement rate
 
-# --- Plot Distribution Convergence ---
-plt.figure(figsize=(8, 5))
-plt.semilogy(range(1, len(solution['history_distribution']['max_diff']) + 1),
-             solution['history_distribution']['max_diff'], marker='o', label='Max Error')
-plt.axhline(y=1e-5, color='k', linestyle=':', label='Tolerance')  # match tol_dist if different
-plt.xlabel('Iteration')
-plt.ylabel('Distribution Difference (log scale)')
-plt.title('Household Distribution Convergence')
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.savefig('plots/distribution_convergence.png')
-plt.close()
+#         # DM parameters
+#         'c_min': 1e-2,     # minimum consumption
+        
+#         # Grid specifications
+#         # 'n_a': 100,         # Number of asset grid points (for testing)
+#         # 'n_m': 100,         # Number of money grid points
+#         # 'n_f': 100,         # Number of illiquid asset grid points
+#         # 'n_b': 200,         # Number of bank grid points
+#         # 'a_min': 0.0,      # Minimum asset holdings
+#         # 'a_max': 110.0,     # Maximum asset holdings
+#         # 'm_min': 0.0,      # Minimum money holdings
+#         # 'm_max': 60.0,     # Maximum money holdings
+#         # 'f_min': 0.0,      # Minimum illiquid holdings
+#         # 'f_max': 60.0,     # Maximum illiquid holdings
+#         # 'b_min': -60.0,        # Minimum loan value
+#         # 'b_max': 60.0,     # Maximum loan value
+#         # 'ny': 150,          # Number of grid points for DM goods
+
+#         # Grid specifications
+#         'n_a': 10,         # Number of asset grid points (for testing)
+#         'n_m': 10,         # Number of money grid points
+#         'n_f': 10,         # Number of illiquid asset grid points
+#         'n_b': 20,         # Number of bank grid points
+#         'a_min': 0.0,      # Minimum asset holdings
+#         'a_max': 20.0,     # Maximum asset holdings
+#         'm_min': 0.0,      # Minimum money holdings
+#         'm_max': 10.0,     # Maximum money holdings
+#         'f_min': 0.0,      # Minimum illiquid holdings
+#         'f_max': 10.0,     # Maximum illiquid holdings
+#         'b_min': -10.0,        # Minimum loan value
+#         'b_max': 10.0,     # Maximum loan value
+#         'ny': 20,          # Number of grid points for DM goods
+        
+#         # Price parameters
+#         'py': 1.0,         # Price of DM goods
+#         'Rl': 1.03,        # Return on illiquid assets
+#         'i': 0.02,         # Nominal interest rate
+#         'Rm': (1.0-0.014)**(1.0/12.0),   # Gross return of real money balances (exogenous)
+
+#         # Government Spending
+#         'Ag0': 0.1,        # Exogenous government spending 
+
+#         # Convergence parameters
+#         'max_iter': 1000,   # Maximum number of iterations
+#         'tol': 1e-5,        # Convergence tolerance
+
+#         # New parameters
+#         'ϖ': 0.075      # prob of meeting a bank if there is no preference shock
+#     }
+
+# # Initialise solver with parameters
+# print("Initialising LagosWrightAiyagariSolver...")
+# solver = LagosWrightAiyagariSolver(params)
+
+# # Set baseline prices
+# baseline_prices = np.array([
+#     params['py'],      # Price of DM goods
+#     params['Rl'],      # Return on illiquid assets
+#     params['i']        # Nominal interest rate
+# ])
+
+# # Print initial conditions
+# print("\nInitial conditions:")
+# firm_result = solver.firm_problem(prices=baseline_prices)
+# print(f"  Employment rate: {firm_result['emp']:.4f}")
+# # print(f"  Labor market tightness: {solver.market_tightness:.4f}")
+# # print(f"  Job finding probability: {solver.job_finding_prob:.4f}")
+# # print(f"  Employment rate: {solver.emp_rate:.4f}")
+# print(f"  Wages (employed, z=1): {firm_result['wages'][1, 1]:.4f}")
+# print(f"  Wages (unemployed, z=1): {firm_result['wages'][1, 0]:.4f}")
+
+# # Solve the model
+# print("\nSolving model...")
+# # solver.compute_firm_block(prices=baseline_prices)
+# solution = solver.solve_model(prices=baseline_prices, plot_frequency=50, report_frequency=100)
+
+# # Print results
+# print("\nSolution results:")
+# print(f"  Converged: {solution['converged']}")
+# print(f"  Iterations: {solution['iterations']}")
+# print(f"  Total time: {solution['total_time']:.2f} seconds")
+# print(f"  Final max diff: {solution['history_value']['max_diff'][-1]:.6e}")
+
+# ## Ensure 'plots' directory exists
+# os.makedirs('plots', exist_ok=True)
+
+# # --- Plot Value Function Convergence ---
+# plt.figure(figsize=(10, 6))
+# plt.semilogy(range(1, len(solution['history_value']['max_diff']) + 1), 
+#              solution['history_value']['max_diff'], 'b-', label='Max Diff')
+# plt.semilogy(range(1, len(solution['history_value']['mean_diff']) + 1), 
+#              solution['history_value']['mean_diff'], 'r--', label='Mean Diff')
+# plt.axhline(y=params['tol'], color='k', linestyle=':', label='Tolerance')
+# plt.xlabel('Iteration')
+# plt.ylabel('Value Function Difference (log scale)')
+# plt.title('Value Function Convergence History')
+# plt.legend()
+# plt.grid(True)
+# plt.tight_layout()
+# plt.savefig('plots/value_function_convergence.png')
+# plt.close()
+
+# # --- Plot Distribution Convergence ---
+# plt.figure(figsize=(8, 5))
+# plt.semilogy(range(1, len(solution['history_distribution']['max_diff']) + 1),
+#              solution['history_distribution']['max_diff'], marker='o', label='Max Error')
+# plt.axhline(y=1e-5, color='k', linestyle=':', label='Tolerance')  # match tol_dist if different
+# plt.xlabel('Iteration')
+# plt.ylabel('Distribution Difference (log scale)')
+# plt.title('Household Distribution Convergence')
+# plt.legend()
+# plt.grid(True)
+# plt.tight_layout()
+# plt.savefig('plots/distribution_convergence.png')
+# plt.close()
