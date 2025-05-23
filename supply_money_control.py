@@ -977,7 +977,7 @@ class LagosWrightAiyagariSolver:
                         args_list.append(args)
 
         # Run the worker function in parallel
-        with Pool(processes=16) as pool:
+        with Pool(processes=8) as pool:
             results = pool.map(solve_cm_worker, args_list)
 
         # Reconstruct results
