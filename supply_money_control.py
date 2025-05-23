@@ -312,6 +312,77 @@ def household_transition_worker(args):
     return G_update
 
 
+def market_clearing_worker(args):
+    (e_idx, z_idx, G, P, dm_result, cm_result,
+     alpha, alpha_0, alpha_1, ϖ,
+     m_grid, f_grid, find_closest_indices) = args
+
+    # Extract policy functions
+    policy_y0 = dm_result['policy_y0']
+    policy_b0 = dm_result['policy_b0']
+    policy_y1 = dm_result['policy_y1']
+    policy_b1 = dm_result['policy_b1']
+    policy_b_noshock = dm_result['policy_b_noshock']
+    policy_b_nobank = dm_result['policy_b_nobank']
+    policy_f = cm_result['policy_f']
+    policy_m = cm_result['policy_m']
+
+    # Initialize local aggregates
+    Yd, Bd, Bs, Fd = 0.0, 0.0, 0.0, 0.0
+    n_a, n_b, n_z = G.shape[0], G.shape[1], G.shape[2]
+    n_m, n_f, n_e = len(m_grid), len(f_grid), P.shape[1]
+    F_local = np.zeros((n_m, n_f, n_z, n_e))
+
+    for a_idx in range(n_a):
+        for b_idx in range(n_b):
+            g = G[a_idx, b_idx, z_idx, e_idx]
+            af = policy_f[a_idx, b_idx, z_idx, e_idx]
+            am = policy_m[a_idx, b_idx, z_idx, e_idx]
+            af_lower, af_upper, af_wt = find_closest_indices(f_grid, af)
+            am_lower, am_upper, am_wt = find_closest_indices(m_grid, am)
+
+            F_local[am_lower, af_lower, z_idx, e_idx] += g * am_wt * af_wt
+            F_local[am_upper, af_lower, z_idx, e_idx] += g * (1 - am_wt) * af_wt
+            F_local[am_lower, af_upper, z_idx, e_idx] += g * am_wt * (1 - af_wt)
+            F_local[am_upper, af_upper, z_idx, e_idx] += g * (1 - am_wt) * (1 - af_wt)
+
+            Fd += g * af
+
+    # ✅ Restore correct z-indexed aggregation for policy values
+    for m_idx in range(n_m):
+        for f_idx in range(n_f):
+            for e_next_idx in range(n_e):
+                prob = P[e_idx, e_next_idx]
+                for z_loop in range(n_z):
+                    f_mass = F_local[m_idx, f_idx, z_loop, e_next_idx]
+
+                    yd0 = policy_y0[m_idx, f_idx, z_loop, e_next_idx]
+                    yd1 = policy_y1[m_idx, f_idx, z_loop, e_next_idx]
+                    Yd += f_mass * alpha * (alpha_0 * yd0 + alpha_1 * yd1) * prob
+
+                    b0 = policy_b0[m_idx, f_idx, z_loop, e_next_idx]
+                    b1 = policy_b1[m_idx, f_idx, z_loop, e_next_idx]
+                    b_noshock = policy_b_noshock[m_idx, f_idx, z_loop, e_next_idx]
+                    b_nobank = policy_b_nobank[m_idx, f_idx, z_loop, e_next_idx]
+
+                    Bs_0 = max(0.0, b0)
+                    Bs_1 = max(0.0, b1)
+                    Bs_noshock = max(0.0, b_noshock)
+                    Bs_nobank = max(0.0, b_nobank)
+
+                    Bd_0 = -min(0.0, b0)
+                    Bd_1 = -min(0.0, b1)
+                    Bd_noshock = -min(0.0, b_noshock)
+                    Bd_nobank = -min(0.0, b_nobank)
+
+                    Bd += f_mass * (alpha * (alpha_0 * Bd_0 + alpha_1 * Bd_1)
+                                    + (1 - alpha) * (ϖ * Bd_noshock + (1 - ϖ) * Bd_nobank)) * prob
+                    Bs += f_mass * (alpha * (alpha_0 * Bs_0 + alpha_1 * Bs_1)
+                                    + (1 - alpha) * (ϖ * Bs_noshock + (1 - ϖ) * Bs_nobank)) * prob
+
+    return Yd, Fd, Bd, Bs
+
+
 
 class LagosWrightAiyagariSolver:
     def __init__(self, params):
@@ -1478,6 +1549,50 @@ class LagosWrightAiyagariSolver:
         return excess_demand, demand_vector, supply_vector
 
     
+    def market_clearing_parallel(self, G, dm_result, cm_result, firm_result):
+        y_star = firm_result['Ys']
+        emp = firm_result['emp']
+        J_total = firm_result['J_total']
+        P = firm_result['transition_matrix']
+
+        m_grid, f_grid = self.m_grid, self.f_grid
+        n_z, n_e = self.n_z, self.n_e
+
+        excess_demand = np.zeros(3)
+        demand_vector = np.zeros(3)
+        supply_vector = np.zeros(3)
+
+        Fs = self.Ag0 + J_total
+        Ys = emp * (self.z_grid @ self.z_dist) * y_star
+
+        args_list = []
+        for e_idx in range(n_e):
+            for z_idx in range(n_z):
+                args = (
+                    e_idx, z_idx, G, P, dm_result, cm_result,
+                    self.alpha, self.alpha_0, self.alpha_1, self.ϖ,
+                    m_grid, f_grid,
+                    find_closest_indices
+                )
+                args_list.append(args)
+
+        with Pool() as pool:
+            results = pool.map(market_clearing_worker, args_list)
+
+        Yd, Fd, Bd, Bs = 0.0, 0.0, 0.0, 0.0
+        for yd, fd, bd, bs in results:
+            Yd += yd
+            Fd += fd
+            Bd += bd
+            Bs += bs
+
+        demand_vector[:] = Yd, Fd, Bd
+        supply_vector[:] = Ys, Fs, Bs
+        excess_demand[:] = Yd - Ys, Fs - Fd, Bd - Bs
+
+        return excess_demand, demand_vector, supply_vector
+
+    
     @staticmethod
     def update_price_bisection(prices, excess_demand, demand_vector, supply_vector, price_bounds):
         """
@@ -2022,6 +2137,37 @@ if __name__ == "__main__":
         print("Transition matrices are equivalent.")
     else:
         print("Transition matrices differ!")
+
+    # Step 2: Serial market clearing
+    start_serial = time.time()
+    serial_output = solver.market_clearing(G_guess, dm_output, cm_output, firm_result)
+    end_serial = time.time()
+    print(f"Serial market clearing time: {end_serial - start_serial:.2f} seconds")
+
+    # Step 3: Parallel market clearing
+    start_parallel = time.time()
+    parallel_output = solver.market_clearing_parallel(G_guess, dm_output, cm_output, firm_result)
+    end_parallel = time.time()
+    print(f"Parallel market clearing time: {end_parallel - start_parallel:.2f} seconds")
+
+    # Step 4: Compare outputs
+    if all(np.allclose(s, p, atol=1e-10) for s, p in zip(serial_output, parallel_output)):
+        print("Market clearing outputs are equivalent.")
+    else:
+        print("Market clearing outputs differ!")
+
+    # Check detailed differences
+    serial_ed, serial_dvec, serial_svec = serial_output
+    parallel_ed, parallel_dvec, parallel_svec = parallel_output
+
+    print("\n🔎 Detailed Comparison:")
+    print(f"Yd diff: {abs(serial_dvec[0] - parallel_dvec[0])}")
+    print(f"Fd diff: {abs(serial_dvec[1] - parallel_dvec[1])}")
+    print(f"Bd diff: {abs(serial_dvec[2] - parallel_dvec[2])}")
+    print(f"Bs diff: {abs(serial_svec[2] - parallel_svec[2])}")
+    print(f"Excess demand diff: {np.abs(serial_ed - parallel_ed)}")
+
+    
 
     
 
