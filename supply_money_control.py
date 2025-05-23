@@ -247,6 +247,71 @@ def solve_cm_worker(args):
             f_grid[max_indices[1]])
 
 
+def household_transition_worker(args):
+    (ab_block, a_grid, b_grid, m_grid, f_grid,
+     policy_m, policy_f, policy_y0, policy_b0, policy_y1, 
+     policy_b1, policy_b_noshock, py, alpha, alpha_0, 
+     alpha_1, ϖ, c_min, P, n_z, 
+     n_e, find_nearest_index, find_closest_indices, G_guess) = args
+
+    G_update = np.zeros_like(G_guess)
+
+    for (a_idx, b_idx) in ab_block:
+        for z_idx in range(n_z):
+            for e_idx in range(n_e):
+                g = G_guess[a_idx, b_idx, z_idx, e_idx]
+                m_prime = policy_m[a_idx, b_idx, z_idx, e_idx]
+                f_prime = policy_f[a_idx, b_idx, z_idx, e_idx]
+                total_asset = m_prime + f_prime
+
+                a_nobank_lower, a_nobank_upper, a_nobank_wt = find_closest_indices(a_grid, total_asset)
+                b_nobank_lower, b_nobank_upper, b_nobank_wt = find_closest_indices(b_grid, 0)
+                m_idx = find_nearest_index(m_grid, m_prime)
+                f_idx = find_nearest_index(f_grid, f_prime)
+
+                for e_next_idx in range(n_e):
+                    prob = P[e_idx, e_next_idx]
+                    y_0 = policy_y0[m_idx, f_idx, z_idx, e_next_idx]
+                    b_0 = policy_b0[m_idx, f_idx, z_idx, e_next_idx]
+                    y_1 = policy_y1[m_idx, f_idx, z_idx, e_next_idx]
+                    b_1 = policy_b1[m_idx, f_idx, z_idx, e_next_idx]
+                    b_noshock = policy_b_noshock[m_idx, f_idx, z_idx, e_next_idx]
+
+                    a_next_noshock = total_asset - b_noshock
+                    a_noshock_lower, a_noshock_upper, a_noshock_wt = find_closest_indices(a_grid, a_next_noshock)
+                    b_noshock_lower, b_noshock_upper, b_noshock_wt = find_closest_indices(b_grid, b_noshock)
+
+                    G_update[a_noshock_lower, b_noshock_lower, z_idx, e_next_idx] += g * (1 - alpha) * ϖ * a_noshock_wt * b_noshock_wt * prob
+                    G_update[a_noshock_upper, b_noshock_lower, z_idx, e_next_idx] += g * (1 - alpha) * ϖ * (1 - a_noshock_wt) * b_noshock_wt * prob
+                    G_update[a_noshock_lower, b_noshock_upper, z_idx, e_next_idx] += g * (1 - alpha) * ϖ * a_noshock_wt * (1 - b_noshock_wt) * prob
+                    G_update[a_noshock_upper, b_noshock_upper, z_idx, e_next_idx] += g * (1 - alpha) * ϖ * (1 - a_noshock_wt) * (1 - b_noshock_wt) * prob
+
+                    G_update[a_nobank_lower, b_nobank_lower, z_idx, e_next_idx] += g * (1 - alpha) * (1 - ϖ) * a_nobank_wt * b_nobank_wt * prob
+                    G_update[a_nobank_upper, b_nobank_lower, z_idx, e_next_idx] += g * (1 - alpha) * (1 - ϖ) * (1 - a_nobank_wt) * b_nobank_wt * prob
+                    G_update[a_nobank_lower, b_nobank_upper, z_idx, e_next_idx] += g * (1 - alpha) * (1 - ϖ) * a_nobank_wt * (1 - b_nobank_wt) * prob
+                    G_update[a_nobank_upper, b_nobank_upper, z_idx, e_next_idx] += g * (1 - alpha) * (1 - ϖ) * (1 - a_nobank_wt) * (1 - b_nobank_wt) * prob
+
+                    a0_next = total_asset - py * y_0 - b_0
+                    a0_next_lower, a0_next_upper, a0_wt = find_closest_indices(a_grid, a0_next)
+                    b0_lower, b0_upper, b0_wt = find_closest_indices(b_grid, b_0)
+
+                    G_update[a0_next_lower, b0_lower, z_idx, e_next_idx] += g * alpha * alpha_0 * a0_wt * b0_wt * prob
+                    G_update[a0_next_upper, b0_lower, z_idx, e_next_idx] += g * alpha * alpha_0 * (1 - a0_wt) * b0_wt * prob
+                    G_update[a0_next_lower, b0_upper, z_idx, e_next_idx] += g * alpha * alpha_0 * a0_wt * (1 - b0_wt) * prob
+                    G_update[a0_next_upper, b0_upper, z_idx, e_next_idx] += g * alpha * alpha_0 * (1 - a0_wt) * (1 - b0_wt) * prob
+
+                    a1_next = total_asset - py * y_1 - b_1
+                    a1_next_lower, a1_next_upper, a1_wt = find_closest_indices(a_grid, a1_next)
+                    b1_lower, b1_upper, b1_wt = find_closest_indices(b_grid, b_1)
+
+                    G_update[a1_next_lower, b1_lower, z_idx, e_next_idx] += g * alpha * alpha_1 * a1_wt * b1_wt * prob
+                    G_update[a1_next_upper, b1_lower, z_idx, e_next_idx] += g * alpha * alpha_1 * (1 - a1_wt) * b1_wt * prob
+                    G_update[a1_next_lower, b1_upper, z_idx, e_next_idx] += g * alpha * alpha_1 * a1_wt * (1 - b1_wt) * prob
+                    G_update[a1_next_upper, b1_upper, z_idx, e_next_idx] += g * alpha * alpha_1 * (1 - a1_wt) * (1 - b1_wt) * prob
+
+    return G_update
+
+
 
 class LagosWrightAiyagariSolver:
     def __init__(self, params):
@@ -1021,11 +1086,11 @@ class LagosWrightAiyagariSolver:
             W_guess = self.W
             
         # Step 1: Solve DM problem to get V
-        dm_results = self.solve_dm_problem_vectorised(W_guess, prices, firm_result)
+        dm_results = self.solve_dm_problem_vectorised_parallel(W_guess, prices, firm_result)
         V = dm_results['V_dm']
         
         # Step 2: Solve CM problem to get updated W
-        cm_results = self.solve_cm_problem_vectorised(V, prices, firm_result)
+        cm_results = self.solve_cm_problem_vectorised_parallel(V, prices, firm_result)
         W_updated = cm_results['W']
         
         # Calculate convergence metrics
@@ -1174,6 +1239,51 @@ class LagosWrightAiyagariSolver:
         G_new /= np.sum(G_new)      
 
         # Return the updated distribution
+        return G_new
+
+    def household_transition_parallel(self, G_guess, prices, cm_output, dm_output, firm_result, batch_size=10):
+        py = prices[0]
+        G_new = np.zeros_like(G_guess)
+
+        # Unpack required inputs
+        policy_m = cm_output['policy_m']
+        policy_f = cm_output['policy_f']
+        policy_y0 = dm_output['policy_y0']
+        policy_b0 = dm_output['policy_b0']
+        policy_y1 = dm_output['policy_y1']
+        policy_b1 = dm_output['policy_b1']
+        policy_b_noshock = dm_output['policy_b_noshock']
+        P = firm_result['transition_matrix']
+
+        # Prepare list of all (a_idx, b_idx) pairs
+        ab_pairs = [(a_idx, b_idx) for a_idx in range(self.n_a) for b_idx in range(self.n_b)]
+
+        # Chunk ab_pairs into batches
+        ab_blocks = [ab_pairs[i:i + batch_size] for i in range(0, len(ab_pairs), batch_size)]
+
+        # Construct argument list for each block
+        args_list = []
+        for ab_block in ab_blocks:
+            args = (
+                ab_block, self.a_grid, self.b_grid, self.m_grid, self.f_grid,
+                policy_m, policy_f, policy_y0, policy_b0, policy_y1, policy_b1, policy_b_noshock,
+                py, self.alpha, self.alpha_0, self.alpha_1, self.ϖ, self.c_min,
+                P, self.n_z, self.n_e,
+                find_nearest_index, find_closest_indices,
+                G_guess
+            )
+            args_list.append(args)
+
+        # Run parallel batch jobs
+        with Pool(processes=4) as pool:
+            results = pool.map(household_transition_worker, args_list)
+
+        # Aggregate G_new from partial updates
+        for update in results:
+            G_new += update
+
+        # Normalize
+        G_new /= np.sum(G_new)
         return G_new
 
 
@@ -1837,55 +1947,81 @@ if __name__ == "__main__":
     print(f"  Wages (employed, z=1): {firm_result['wages'][1, 1]:.4f}")
     print(f"  Wages (unemployed, z=1): {firm_result['wages'][1, 0]:.4f}")
 
-    # See time before parallelisation
-    start_time = time.time()
-    solution_1 = solver.solve_dm_problem_vectorised(W_guess=solver.W, prices=baseline_prices, firm_result=firm_result)
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    print(f"Solved DM problem before parallelisation in {elapsed_time:.2f} seconds.")   
+    # # See time before parallelisation
+    # start_time = time.time()
+    # solution_1 = solver.solve_dm_problem_vectorised(W_guess=solver.W, prices=baseline_prices, firm_result=firm_result)
+    # end_time = time.time()
+    # elapsed_time = end_time - start_time
+    # print(f"Solved DM problem before parallelisation in {elapsed_time:.2f} seconds.")   
 
-    # Step 6: Run the parallelized DM solver
-    start_time = time.time()
-    print("\nSolving DM block with multiprocessing...")
-    solution_2 = solver.solve_dm_problem_vectorised_parallel(W_guess=solver.W, prices=baseline_prices, firm_result=firm_result)
-    end_time = time.time()
-    elapsed_time = end_time - start_time
-    print(f"Solved DM problem after parallelisation in {elapsed_time:.2f} seconds.")
+    # # Step 6: Run the parallelized DM solver
+    # start_time = time.time()
+    # print("\nSolving DM block with multiprocessing...")
+    # solution_2 = solver.solve_dm_problem_vectorised_parallel(W_guess=solver.W, prices=baseline_prices, firm_result=firm_result)
+    # end_time = time.time()
+    # elapsed_time = end_time - start_time
+    # print(f"Solved DM problem after parallelisation in {elapsed_time:.2f} seconds.")
 
-    # Compare whether the two solutions are the same
-    if np.allclose(solution_1['V_dm'], solution_2['V_dm']) & np.allclose(solution_1['policy_b0'], solution_2['policy_b0']) & \
-        np.allclose(solution_1['policy_b1'], solution_2['policy_b1']) & \
-            np.allclose(solution_1['policy_b_noshock'], solution_2['policy_b_noshock']) & \
-                np.allclose(solution_1['policy_b_nobank'], solution_2['policy_b_nobank']):
-        print("Solutions in DM are equivalent.")
-    else:
-        print("Solutions in DM differ.")
+    # # Compare whether the two solutions are the same
+    # if np.allclose(solution_1['V_dm'], solution_2['V_dm']) & np.allclose(solution_1['policy_b0'], solution_2['policy_b0']) & \
+    #     np.allclose(solution_1['policy_b1'], solution_2['policy_b1']) & \
+    #         np.allclose(solution_1['policy_b_noshock'], solution_2['policy_b_noshock']) & \
+    #             np.allclose(solution_1['policy_b_nobank'], solution_2['policy_b_nobank']):
+    #     print("Solutions in DM are equivalent.")
+    # else:
+    #     print("Solutions in DM differ.")
 
-    # Step 3: Run serial version for benchmark
-    print("\nSolving CM block without multiprocessing (serial)...")
+    # # Step 3: Run serial version for benchmark
+    # print("\nSolving CM block without multiprocessing (serial)...")
+    # start_serial = time.time()
+    # serial_solution = solver.solve_cm_problem_vectorised(V_guess=solver.V, prices=baseline_prices, firm_result=firm_result)
+    # end_serial = time.time()
+    # print("Serial CM solve time: {:.2f} seconds".format(end_serial - start_serial))
+    # print("Sample serial W[0,0,0,0]:", serial_solution['W'][0,0,0,0])
+
+    # # Step 4: Run parallel version
+    # print("\nSolving CM block with multiprocessing...")
+    # start_parallel = time.time()
+    # parallel_solution = solver.solve_cm_problem_vectorised_parallel(V_guess=solver.V, prices=baseline_prices, firm_result=firm_result)
+    # end_parallel = time.time()
+    # print("Parallel CM solve time: {:.2f} seconds".format(end_parallel - start_parallel))
+    # print("Sample parallel W[0,0,0,0]:", parallel_solution['W'][0,0,0,0])
+
+
+    # # Step 5: Compare results
+    # print("\nChecking equivalence of serial and parallel results...")
+    # if np.allclose(serial_solution['W'], parallel_solution['W']) and \
+    #    np.allclose(serial_solution['policy_m'], parallel_solution['policy_m']) and \
+    #    np.allclose(serial_solution['policy_f'], parallel_solution['policy_f']):
+    #     print("Solutions in CM are equivalent.")
+    # else:
+    #     print("Solutions in CM differ.")
+
+    # Solve DM and CM to get policy functions
+    dm_output = solver.solve_dm_problem_vectorised_parallel(solver.W, baseline_prices, firm_result)
+    cm_output = solver.solve_cm_problem_vectorised_parallel(dm_output['V_dm'], baseline_prices, firm_result)
+
+    # Create uniform initial guess for G
+    G_guess = np.ones((solver.n_a, solver.n_b, solver.n_z, solver.n_e))
+    G_guess /= np.sum(G_guess)
+
+    # Serial version
     start_serial = time.time()
-    serial_solution = solver.solve_cm_problem_vectorised(V_guess=solver.V, prices=baseline_prices, firm_result=firm_result)
+    G_serial = solver.household_transition(G_guess, baseline_prices, cm_output, dm_output, firm_result)
     end_serial = time.time()
-    print("Serial CM solve time: {:.2f} seconds".format(end_serial - start_serial))
-    print("Sample serial W[0,0,0,0]:", serial_solution['W'][0,0,0,0])
+    print(f"Serial household transition time: {end_serial - start_serial:.2f} seconds")
 
-    # Step 4: Run parallel version
-    print("\nSolving CM block with multiprocessing...")
+    # Parallel version
     start_parallel = time.time()
-    parallel_solution = solver.solve_cm_problem_vectorised_parallel(V_guess=solver.V, prices=baseline_prices, firm_result=firm_result)
+    G_parallel = solver.household_transition_parallel(G_guess, baseline_prices, cm_output, dm_output, firm_result)
     end_parallel = time.time()
-    print("Parallel CM solve time: {:.2f} seconds".format(end_parallel - start_parallel))
-    print("Sample parallel W[0,0,0,0]:", parallel_solution['W'][0,0,0,0])
+    print(f"Parallel household transition time: {end_parallel - start_parallel:.2f} seconds")
 
-
-    # Step 5: Compare results
-    print("\nChecking equivalence of serial and parallel results...")
-    if np.allclose(serial_solution['W'], parallel_solution['W']) and \
-       np.allclose(serial_solution['policy_m'], parallel_solution['policy_m']) and \
-       np.allclose(serial_solution['policy_f'], parallel_solution['policy_f']):
-        print("Solutions in CM are equivalent.")
+    # Compare
+    if np.allclose(G_serial, G_parallel, atol=1e-10):
+        print("Transition matrices are equivalent.")
     else:
-        print("Solutions in CM differ.")
+        print("Transition matrices differ!")
 
     
 
