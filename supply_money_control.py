@@ -247,37 +247,6 @@ def solve_cm_worker(args):
             f_grid[max_indices[1]])
 
 
-def solve_cm_worker_batched(args):
-    (a_idx, b_idx, a, b, beta, c_min, Rm, utility_func,
-     m_grid, f_grid, portfolio_costs, V_guess, wages, P, i, n_z, n_e) = args
-
-    W_block = np.zeros((n_z, n_e))
-    M_block = np.zeros((n_z, n_e))
-    F_block = np.zeros((n_z, n_e))
-
-    for z_idx in range(n_z):
-        for e_idx in range(n_e):
-            income = wages[z_idx, e_idx]
-            P_reshaped = P[e_idx, :].reshape(1, 1, -1)
-            V_slice = V_guess[:, :, z_idx, :]  # (n_m, n_f, n_e)
-            cont_values = np.sum(V_slice * P_reshaped, axis=2)
-
-            total_resources = a + (1 + i) * b + income
-            c_values = total_resources - portfolio_costs
-            valid_c = c_values >= c_min
-
-            w_choice = np.where(valid_c,
-                                utility_func(c_values) + beta * cont_values,
-                                -1e3)
-
-            max_val = np.max(w_choice)
-            max_indices = np.unravel_index(np.argmax(w_choice), w_choice.shape)
-
-            W_block[z_idx, e_idx] = max_val
-            M_block[z_idx, e_idx] = m_grid[max_indices[0]]
-            F_block[z_idx, e_idx] = f_grid[max_indices[1]]
-
-    return a_idx, b_idx, W_block, M_block, F_block
 
 class LagosWrightAiyagariSolver:
     def __init__(self, params):
@@ -1023,50 +992,7 @@ class LagosWrightAiyagariSolver:
             'policy_f': policy_f,
         }
 
-    # Step 2 (revised): Batched parallel CM solver matching updated worker function
-    def solve_cm_problem_batch(self, V_guess, prices, firm_result):
-        Rl = prices[1]
-        i = prices[2]
 
-        # Initialize output arrays
-        shape = (self.n_a, self.n_b, self.n_z, self.n_e)
-        w_value = np.zeros(shape)
-        policy_m = np.zeros(shape)
-        policy_f = np.zeros(shape)
-
-        wages = firm_result['wages']
-        P = firm_result['transition_matrix']
-
-        # Precompute portfolio costs
-        m_grid_reshaped = self.m_grid.reshape(-1, 1)
-        f_grid_reshaped = self.f_grid.reshape(1, -1)
-        portfolio_costs = m_grid_reshaped / self.Rm + f_grid_reshaped / Rl
-
-        args_list = []
-        for a_idx, a in enumerate(self.a_grid):
-            for b_idx, b in enumerate(self.b_grid):
-                args = (
-                    a_idx, b_idx, a, b, self.beta, self.c_min, self.Rm, self.utility,
-                    self.m_grid, self.f_grid, portfolio_costs, V_guess, wages, P,
-                    i, self.n_z, self.n_e
-                )
-                args_list.append(args)
-
-        # Run the batched worker function in parallel
-        with Pool(processes=16) as pool:
-            results = pool.map(solve_cm_worker_batched, args_list)
-
-        # Reconstruct full arrays from batched results
-        for a_idx, b_idx, W_block, M_block, F_block in results:
-            w_value[a_idx, b_idx, :, :] = W_block
-            policy_m[a_idx, b_idx, :, :] = M_block
-            policy_f[a_idx, b_idx, :, :] = F_block
-
-        return {
-            'W': w_value,
-            'policy_m': policy_m,
-            'policy_f': policy_f,
-        }
         
     def solver_iteration(self, prices, firm_result, W_guess=None):
         """
@@ -1951,13 +1877,6 @@ if __name__ == "__main__":
     print("Parallel CM solve time: {:.2f} seconds".format(end_parallel - start_parallel))
     print("Sample parallel W[0,0,0,0]:", parallel_solution['W'][0,0,0,0])
 
-    print("\nSolving CM block with multiprocessing...")
-    start_batch = time.time()
-    batch_solution = solver.solve_cm_problem_batch(V_guess=solver.V, prices=baseline_prices, firm_result=firm_result)
-    end_batch = time.time()
-    print("Batch CM solve time: {:.2f} seconds".format(end_batch - start_batch))
-    print("Sample Batch W[0,0,0,0]:", parallel_solution['W'][0,0,0,0])
-
 
     # Step 5: Compare results
     print("\nChecking equivalence of serial and parallel results...")
@@ -1968,13 +1887,7 @@ if __name__ == "__main__":
     else:
         print("Solutions in CM differ.")
 
-    print("\nChecking equivalence of serial and batch results...")
-    if np.allclose(serial_solution['W'], batch_solution['W']) and \
-       np.allclose(serial_solution['policy_m'], batch_solution['policy_m']) and \
-       np.allclose(serial_solution['policy_f'], batch_solution['policy_f']):
-        print("Solutions in CM are equivalent.")
-    else:
-        print("Solutions in CM differ.")
+    
 
 
 
