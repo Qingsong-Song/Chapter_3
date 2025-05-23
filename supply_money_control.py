@@ -225,6 +225,27 @@ def solve_dm_worker(args):
 
     return (m_idx, f_idx, result)
 
+def solve_cm_worker(args):
+    (a_idx, b_idx, z_idx, e_idx, a, b, beta, c_min, Rm, utility_func,
+    m_grid, f_grid, portfolio_costs, V_slice, income, i, P_reshaped) = args
+
+    total_resources = a + (1 + i) * b + income
+    c_values = total_resources - portfolio_costs  # shape (n_m, n_f)
+    valid_c = c_values >= c_min
+
+    cont_values = np.sum(V_slice * P_reshaped, axis=2)  # (n_m, n_f)
+    w_choice = np.where(valid_c,
+                        utility_func(c_values) + beta * cont_values,
+                        -1e3)
+
+    max_val = np.max(w_choice)
+    max_indices = np.unravel_index(np.argmax(w_choice), w_choice.shape)
+
+    return (a_idx, b_idx, z_idx, e_idx,
+            max_val,
+            m_grid[max_indices[0]],
+            f_grid[max_indices[1]])
+
 
 class LagosWrightAiyagariSolver:
     def __init__(self, params):
@@ -813,7 +834,7 @@ class LagosWrightAiyagariSolver:
                     self.c_min, self.ϖ
                 ))
 
-        with Pool() as pool:
+        with Pool(processes=16) as pool:
             results = pool.map(solve_dm_worker, args)
 
         for m_idx, f_idx, res in results:
@@ -918,7 +939,58 @@ class LagosWrightAiyagariSolver:
             'policy_m': policy_m,
             'policy_f': policy_f,
         }
-    
+
+    def solve_cm_problem_vectorised_parallel(self, V_guess, prices, firm_result):
+        Rl = prices[1]
+        i = prices[2]
+
+        # Initialize output arrays
+        shape = (self.n_a, self.n_b, self.n_z, self.n_e)
+        w_value = np.zeros(shape)
+        policy_m = np.zeros(shape)
+        policy_f = np.zeros(shape)
+
+        wages = firm_result['wages']
+        P = firm_result['transition_matrix']
+
+        # Precompute portfolio costs
+        m_grid_reshaped = self.m_grid.reshape(-1, 1)
+        f_grid_reshaped = self.f_grid.reshape(1, -1)
+        portfolio_costs = m_grid_reshaped / self.Rm + f_grid_reshaped / Rl
+
+        args_list = []
+
+        for e_idx in range(self.n_e):
+            P_reshaped = P[e_idx, :].reshape(1, 1, -1)
+            for z_idx in range(self.n_z):
+                income = wages[z_idx, e_idx]
+                V_slice = V_guess[:, :, z_idx, :]  # (n_m, n_f, n_e)
+
+                for a_idx, a in enumerate(self.a_grid):
+                    for b_idx, b in enumerate(self.b_grid):
+                        args = (
+                            a_idx, b_idx, z_idx, e_idx, a, b, self.beta, self.c_min, self.Rm,
+                            self.utility, self.m_grid, self.f_grid, portfolio_costs,
+                            V_slice, income, i, P_reshaped
+                        )
+                        args_list.append(args)
+
+        # Run the worker function in parallel
+        with Pool(processes=8) as pool:
+            results = pool.map(solve_cm_worker, args_list)
+
+        # Reconstruct results
+        for a_idx, b_idx, z_idx, e_idx, max_val, m_star, f_star in results:
+            w_value[a_idx, b_idx, z_idx, e_idx] = max_val
+            policy_m[a_idx, b_idx, z_idx, e_idx] = m_star
+            policy_f[a_idx, b_idx, z_idx, e_idx] = f_star
+
+        return {
+            'W': w_value,
+            'policy_m': policy_m,
+            'policy_f': policy_f,
+        }
+        
     def solver_iteration(self, prices, firm_result, W_guess=None):
         """
         BLOCK 1: Solve the DM and CM problems via iteration.
@@ -1736,10 +1808,10 @@ if __name__ == "__main__":
         'beta': 0.96, 'alpha': 0.075, 'alpha_1': 0.06, 'gamma': 1.5, 'Psi': 2.2,
         'psi': 0.28, 'zeta': 0.75, 'nu': 1.6, 'mu': 0.7, 'delta': 0.035,
         'kappa': 7.29, 'repl_rate': 0.4, 'c_min': 1e-2,
-        'n_a': 10, 'n_m': 10, 'n_f': 10, 'n_b': 20,
-        'a_min': 0.0, 'a_max': 20.0, 'm_min': 0.0, 'm_max': 10.0,
-        'f_min': 0.0, 'f_max': 10.0, 'b_min': -10.0, 'b_max': 10.0,
-        'ny': 20, 'py': 1.0, 'Rl': 1.03, 'i': 0.02,
+        'n_a': 100, 'n_m': 100, 'n_f': 100, 'n_b': 200,
+        'a_min': 0.0, 'a_max': 100.0, 'm_min': 0.0, 'm_max': 50.0,
+        'f_min': 0.0, 'f_max': 50.0, 'b_min': -50.0, 'b_max': 50.0,
+        'ny': 200, 'py': 1.0, 'Rl': 1.03, 'i': 0.02,
         'Rm': (1.0 - 0.014)**(1.0 / 12.0), 'Ag0': 0.1,
         'max_iter': 1000, 'tol': 1e-5, 'ϖ': 0.075
     }
@@ -1764,7 +1836,7 @@ if __name__ == "__main__":
 
     # See time before parallelisation
     start_time = time.time()
-    solution = solver.solve_dm_problem_vectorised(W_guess=solver.W, prices=baseline_prices, firm_result=firm_result)
+    solution_1 = solver.solve_dm_problem_vectorised(W_guess=solver.W, prices=baseline_prices, firm_result=firm_result)
     end_time = time.time()
     elapsed_time = end_time - start_time
     print(f"Solved DM problem before parallelisation in {elapsed_time:.2f} seconds.")   
@@ -1772,14 +1844,47 @@ if __name__ == "__main__":
     # Step 6: Run the parallelized DM solver
     start_time = time.time()
     print("\nSolving DM block with multiprocessing...")
-    solution = solver.solve_dm_problem_vectorised_parallel(W_guess=solver.W, prices=baseline_prices, firm_result=firm_result)
+    solution_2 = solver.solve_dm_problem_vectorised_parallel(W_guess=solver.W, prices=baseline_prices, firm_result=firm_result)
     end_time = time.time()
     elapsed_time = end_time - start_time
     print(f"Solved DM problem after parallelisation in {elapsed_time:.2f} seconds.")
 
-    # Step 7: Use the solution
-    print("Finished solving. V_dm shape:", solution['V_dm'].shape)
-    print("Sample V_dm[0,0,0,0]:", solution['V_dm'][0, 0, 0, 0])
+    # Compare whether the two solutions are the same
+    if np.allclose(solution_1['V_dm'], solution_2['V_dm']) & np.allclose(solution_1['policy_b0'], solution_2['policy_b0']) & \
+        np.allclose(solution_1['policy_b1'], solution_2['policy_b1']) & \
+            np.allclose(solution_1['policy_b_noshock'], solution_2['policy_b_noshock']) & \
+                np.allclose(solution_1['policy_b_nobank'], solution_2['policy_b_nobank']):
+        print("Solutions in DM are equivalent.")
+    else:
+        print("Solutions in DM differ.")
+
+    # Step 3: Run serial version for benchmark
+    print("\nSolving CM block without multiprocessing (serial)...")
+    start_serial = time.time()
+    serial_solution = solver.solve_cm_problem_vectorised(V_guess=solver.V, prices=baseline_prices, firm_result=firm_result)
+    end_serial = time.time()
+    print("Serial CM solve time: {:.2f} seconds".format(end_serial - start_serial))
+    print("Sample serial W[0,0,0,0]:", serial_solution['W'][0,0,0,0])
+
+    # Step 4: Run parallel version
+    print("\nSolving CM block with multiprocessing...")
+    start_parallel = time.time()
+    parallel_solution = solver.solve_cm_problem_vectorised_parallel(V_guess=solver.V, prices=baseline_prices, firm_result=firm_result)
+    end_parallel = time.time()
+    print("Parallel CM solve time: {:.2f} seconds".format(end_parallel - start_parallel))
+    print("Sample parallel W[0,0,0,0]:", parallel_solution['W'][0,0,0,0])
+
+    # Step 5: Compare results
+    print("\nChecking equivalence of serial and parallel results...")
+    if np.allclose(serial_solution['W'], parallel_solution['W']) and \
+       np.allclose(serial_solution['policy_m'], parallel_solution['policy_m']) and \
+       np.allclose(serial_solution['policy_f'], parallel_solution['policy_f']):
+        print("Solutions in CM are equivalent.")
+    else:
+        print("Solutions in CM differ.")
+
+
+
     
 
 # params = {
